@@ -5,13 +5,6 @@ train.py
 --------
 TaFD: Threat-aware Frequency Decoupling for Heterogeneous Adversarial Robustness.
 
-Main training script with periodic APGD evaluation.
-
-Key design choices:
-  - Training:    PGD-based adversarial examples with BPDA surrogate for hard routing
-  - Evaluation:  APGD (100 steps) on the full test attack set post-training
-  - Domain mapping updated every `--map_update_every` iterations via K-means + Hungarian alignment
-
 Usage:
   python train.py --dataset CIFAR100 --backbone resnet --attack_config v10 --gpu 0
 """
