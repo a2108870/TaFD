@@ -3,10 +3,6 @@
 """
 eval.py
 -------
-TaFD: Threat-aware Frequency Decoupling — Standalone Evaluation.
-
-Loads a trained checkpoint and evaluates adversarial robustness on the full
-test set using APGD (100 steps) and other configured attacks.
 
 Usage:
   python eval.py --checkpoint ./results/.../latest_model.pth \
