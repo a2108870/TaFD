@@ -328,7 +328,8 @@ class FCConv(nn.Module):
             device: torch.device,
             threat_domain_index: torch.Tensor,
             router_weights: torch.Tensor = None,
-            bpda: bool = False
+            bpda: bool = False,
+            soft_forward: bool = False
     ):
         """
         Generate spectral masks on rFFT half-plane.
@@ -344,7 +345,7 @@ class FCConv(nn.Module):
         params_hard = self.threat_domain_embedding(threat_domain_index)  # [B, K*(M+1)]
 
         use_soft = (
-            bool(bpda)
+            (bool(bpda) or bool(soft_forward))
             and (router_weights is not None)
             and (router_weights.dim() == 2)
             and (router_weights.size(0) == B_batch)
@@ -353,12 +354,17 @@ class FCConv(nn.Module):
 
         if use_soft:
             # soft domain embedding = w @ Embedding.weight
-            W = self.threat_domain_embedding.weight.detach()              # [D, K*(M+1)]
+            W = self.threat_domain_embedding.weight
+            if not soft_forward:
+                W = W.detach()
             rw = router_weights.to(W.dtype)                         # [B, D]
             params_soft = rw @ W                                          # [B, K*(M+1)]
 
-            # BPDA detach trick: forward == hard; backward gradient from soft
-            params_flat = params_hard.detach() - params_soft.detach() + params_soft
+            if soft_forward:
+                params_flat = params_soft
+            else:
+                # BPDA detach trick: forward == hard; backward gradient from soft
+                params_flat = params_hard.detach() - params_soft.detach() + params_soft
         else:
             params_flat = params_hard
 
@@ -455,7 +461,8 @@ class FCConv(nn.Module):
 
         return out, expert_usage, selected_masks_batch
 
-    def forward(self, x, threat_domain_index=None, router_weights=None, bpda: bool = False, *_, **kwargs):
+    def forward(self, x, threat_domain_index=None, router_weights=None,
+                bpda: bool = False, soft_forward: bool = False, *_, **kwargs):
         """
         Forward pass with hard routing in forward, BPDA soft surrogate in backward.
 
@@ -480,7 +487,7 @@ class FCConv(nn.Module):
             threat_domain_index = torch.clamp(threat_domain_index, 0, self.num_threat_domains - 1)
 
         use_soft = (
-                bool(bpda)
+                (bool(bpda) or bool(soft_forward))
                 and (router_weights is not None)
                 and (router_weights.dim() == 2)
                 and (router_weights.size(0) == B)
@@ -498,7 +505,8 @@ class FCConv(nn.Module):
             H, W, device,
             threat_domain_index=threat_domain_index,
             router_weights=router_weights,
-            bpda=bpda
+            bpda=bpda,
+            soft_forward=soft_forward
         )
         Xk = (x_fft.unsqueeze(1) * spectral_masks).reshape(B * self.K, C_in, H, spectral_masks.size(-1))
 
@@ -510,14 +518,17 @@ class FCConv(nn.Module):
         H2, W2 = expert_out_flat.shape[-2], expert_out_flat.shape[-1]
         expert_out = expert_out_flat.view(B, self.K, self.out_channels, H2, W2)
 
-        # 5) Hard routing (forward), Soft routing surrogate (backward)
+        # 5) Hard routing with BPDA surrogate, or exact soft routing for no-domain mix.
         batch_idx = torch.arange(B, device=expert_out.device)
         Y_hard = expert_out[batch_idx, threat_domain_index, :, :, :]  # [B, C_out, H2, W2]
 
         w = router_weights.to(expert_out.dtype).view(B, self.K, 1, 1, 1)
         Y_soft = (w * expert_out).sum(dim=1)  # [B, C_out, H2, W2]
 
-        Y = Y_hard.detach() - Y_soft.detach() + Y_soft
+        if soft_forward:
+            Y = Y_soft
+        else:
+            Y = Y_hard.detach() - Y_soft.detach() + Y_soft
 
         # 6) Residual
         residual = self.residual_conv(x)
@@ -526,13 +537,16 @@ class FCConv(nn.Module):
         if self.bias_param is not None:
             out = out + self.bias_param.view(1, -1, 1, 1)
 
-        # 7) Expert usage (forward is still hard routing)
+        # 7) Expert usage
         expert_usage = {}
-        for d in range(self.num_threat_domains):
-            m = (threat_domain_index == d)
-            if m.any():
-                v = torch.zeros(self.K, device=expert_out.device)
-                v[d] = 1.0
-                expert_usage[f'domain_{d}'] = v
+        if soft_forward:
+            expert_usage["uniform_mix"] = router_weights.detach().mean(dim=0)
+        else:
+            for d in range(self.num_threat_domains):
+                m = (threat_domain_index == d)
+                if m.any():
+                    v = torch.zeros(self.K, device=expert_out.device)
+                    v[d] = 1.0
+                    expert_usage[f'domain_{d}'] = v
 
         return out, expert_usage, spectral_masks

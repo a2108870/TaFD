@@ -1,10 +1,9 @@
 import torch
-import numpy as np
-import torch.nn as nn
+
+from attacks.gateatk_utils import balanced_gate_weight, gate_margin_loss_minimize, unpack_model_outputs
 
 
-def CF(img, param, steps):  # color filter
-
+def CF(img, param, steps):
     param = param[:, :, None, None]
     color_curve_sum = torch.sum(param, 4) + 1e-30
     total_image = img * 0
@@ -14,63 +13,51 @@ def CF(img, param, steps):  # color filter
     return total_image
 
 
-def ACE(input, y, model, device, lr=1, max_iterations=10, steps=64, bound=16, ncls=10,
-        norm_mean=None, norm_std=None):
-    """
-    ACE attack function.
-    Note: Model handles normalization internally, so input should be in [0,1] pixel domain.
-    norm_mean and norm_std parameters are kept for API compatibility but not used.
-    """
+def ACE(input, y, true_gate, model, device, lr=1, max_iterations=10, steps=64, bound=16, ncls=10,
+        gate_loss_scale=1.0, norm_mean=None, norm_std=None):
     model.eval()
     batch_size = input.shape[0]
 
-    # 移动张量到设备并一次性转换格式
     X_ori = input.to(device)
     labels = y.to(device)
+    true_gate = true_gate.to(device)
     labels_onehot = torch.zeros(batch_size, ncls, device=device)
     labels_onehot.scatter_(1, labels.unsqueeze(1), 1)
     labels_infhot = torch.zeros_like(labels_onehot).scatter_(1, labels.unsqueeze(1), float('inf'))
 
-    # 初始化参数（更高效的内存使用）
     Paras = torch.full((batch_size, 3, steps), 1 / steps, device=device, requires_grad=True)
     best_adversary = X_ori.clone()
-
-    # 预计算常量值
-    norm_const = 1.0 / (steps * bound)
     step_size = 1.0 / steps
 
-    for iteration in range(max_iterations):
-        # 计算对抗样本
+    for _ in range(max_iterations):
         X_adv = CF(X_ori, Paras, steps)
+        outputs = model(X_adv)
+        logits, gate_logits = unpack_model_outputs(outputs)
 
-        # 前向传播（模型内部处理标准化）
-        logits = model(X_adv)[0]
-
-        # 高效计算损失
         real = logits.gather(1, labels.unsqueeze(1)).squeeze(1)
         other = (logits - labels_infhot).max(1)[0]
-        loss = torch.clamp(real - other, min=0).sum()
+        loss_cls = torch.clamp(real - other, min=0).sum()
 
-        # 反向传播
+        if gate_logits is not None:
+            loss_gate = gate_margin_loss_minimize(gate_logits, true_gate, reduction='sum')
+            weight = balanced_gate_weight(loss_cls, loss_gate, gate_loss_scale)
+            loss = loss_cls + weight * loss_gate
+        else:
+            loss = loss_cls
+
         loss.backward()
 
-        # 优化梯度计算
         with torch.no_grad():
             grad_norms = torch.norm(Paras.grad.view(batch_size, -1), dim=1, keepdim=True).add_(1e-8)
             grad_scaled = Paras.grad.div_(grad_norms.view(-1, 1, 1))
             Paras.sub_(lr * grad_scaled)
-
-            # 高效的值裁剪
             Paras.clamp_(min=step_size, max=step_size * bound)
 
-        # 重置梯度
         Paras.grad.zero_()
 
-        # 检查成功并更新最佳对抗样本
         with torch.no_grad():
             predicted_classes = logits.argmax(1)
-            is_adv = (predicted_classes != labels)
-
+            is_adv = predicted_classes != labels
             if is_adv.any():
                 best_adversary[is_adv] = X_adv[is_adv]
 

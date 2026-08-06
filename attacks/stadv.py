@@ -1,4 +1,4 @@
-# stadv.py
+# stadv_attack_std.py
 # -*- coding: utf-8 -*-
 """
 stAdv-like differentiable spatial transformation attack (PGD-style).

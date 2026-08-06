@@ -1,18 +1,18 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 models/resnet_cifar_firstblock_FDConv_10_mix.py
 
-整合版本：支持 ResNet 和 MobileViT 两种骨架，通过 create_encoder(backbone=...) 选择。
+鏁村悎鐗堟湰锛氭敮鎸?ResNet 鍜?MobileViT 涓ょ楠ㄦ灦锛岄€氳繃 create_encoder(backbone=...) 閫夋嫨銆?
 
-使用方法：
+浣跨敤鏂规硶锛?
   from models.resnet_cifar_firstblock_FDConv_10_mix import create_encoder
   model = create_encoder(backbone='resnet', num_classes=100, num_domains=4)
   model = create_encoder(backbone='mobilevit', num_classes=100, num_domains=4)
 
-架构说明：
-  • ResNetEncoder: ResNet-34 骨架 + FDConv (stem + 每阶段首块 conv1)
-  • MobileViTEncoder: MobileViT 骨架 + FDConv (stem + 指定 MV2Block depthwise)
-  • 两者均支持 BPDA (set_bpda 方法)
+鏋舵瀯璇存槑锛?
+  鈥?ResNetEncoder: ResNet-34 楠ㄦ灦 + FDConv (stem + 姣忛樁娈甸鍧?conv1)
+  鈥?MobileViTEncoder: MobileViT 楠ㄦ灦 + FDConv (stem + 鎸囧畾 MV2Block depthwise)
+  鈥?涓よ€呭潎鏀寔 BPDA (set_bpda 鏂规硶)
 """
 
 import math
@@ -20,18 +20,18 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.fdconv import FCConv
+from models.fdconv_woDomainUniformMix import FCConv
 
-# 动态聚类
+# 鍔ㄦ€佽仛绫?
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
 from scipy.optimize import linear_sum_assignment
 from sklearn.preprocessing import StandardScaler
 
 
-# ──────────────────────────────────────────────────────────────────────────
-#  数据集标准化参数
-# ──────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  鏁版嵁闆嗘爣鍑嗗寲鍙傛暟
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 DATASET_STATS = {
     'CIFAR10': {'mean': [0.4914, 0.4822, 0.4465], 'std': [0.2023, 0.1994, 0.2010]},
     'CIFAR100': {'mean': [0.4914, 0.4822, 0.4465], 'std': [0.2023, 0.1994, 0.2010]},
@@ -42,7 +42,7 @@ DATASET_STATS = {
 
 
 class InputNormalize(nn.Module):
-    """输入标准化层，使用 register_buffer 确保设备一致性"""
+    """Input normalization layer with registered mean/std buffers."""
     def __init__(self, mean, std):
         super().__init__()
         self.register_buffer('mean', torch.tensor(mean).view(1, 3, 1, 1))
@@ -52,20 +52,20 @@ class InputNormalize(nn.Module):
         return (x - self.mean) / self.std
 
 
-# ──────────────────────────────────────────────────────────────────────────
-#  频谱特征提取器（用于 WaveletDomainManager 域分类）
-#  提取特征：基础12维（能量份额+色度角）+ 色度主导性3维 = 15维
-# ──────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  棰戣氨鐗瑰緛鎻愬彇鍣紙鐢ㄤ簬 WaveletDomainManager 鍩熷垎绫伙級
+#  鎻愬彇鐗瑰緛锛氬熀纭€12缁达紙鑳介噺浠介+鑹插害瑙掞級+ 鑹插害涓诲鎬?缁?= 15缁?
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 class SpectralFeatureExtractor:
     """
-    频谱特征提取器，用于威胁域分类。
+    棰戣氨鐗瑰緛鎻愬彇鍣紝鐢ㄤ簬濞佽儊鍩熷垎绫汇€?
 
-    提取的特征：
-    - 9个能量份额（YCbCr × 低/中/高频）
-    - 3个色度角
-    - 3个色度主导性（低/中/高频的 Cr-Cb 差异）
+    鎻愬彇鐨勭壒寰侊細
+    - 9涓兘閲忎唤棰濓紙YCbCr 脳 浣?涓?楂橀锛?
+    - 3涓壊搴﹁
+    - 3涓壊搴︿富瀵兼€э紙浣?涓?楂橀鐨?Cr-Cb 宸紓锛?
 
-    总维度：15
+    鎬荤淮搴︼細15
     """
 
     def __init__(self, eps=1e-6):
@@ -118,13 +118,13 @@ class SpectralFeatureExtractor:
 
     def features_from_images(self, img_pixel):
         """
-        从图像提取频谱特征。
+        浠庡浘鍍忔彁鍙栭璋辩壒寰併€?
 
         Args:
-            img_pixel: [B, 3, H, W] 输入图像
+            img_pixel: [B, 3, H, W] 杈撳叆鍥惧儚
 
         Returns:
-            features: [B, 15] 频谱特征向量
+            features: [B, 15] 棰戣氨鐗瑰緛鍚戦噺
         """
         B, C, H, W = img_pixel.shape
         img_fft = torch.fft.rfft2(img_pixel.float(), norm='ortho')
@@ -134,7 +134,7 @@ class SpectralFeatureExtractor:
         # energy = (ycbcr_fft.abs() ** 2)
         energy = ycbcr_fft.real.pow(2) + ycbcr_fft.imag.pow(2)
 
-        # 基础特征：9个能量份额 + 3个色度角
+        # 鍩虹鐗瑰緛锛?涓兘閲忎唤棰?+ 3涓壊搴﹁
         _, _, H_, Wc_ = energy.shape
         N = H_ * Wc_
         e_flat = energy.reshape(B, 3, N)
@@ -150,7 +150,7 @@ class SpectralFeatureExtractor:
 
         feats_base = torch.cat([share.reshape(B, 9), chroma_angle], dim=1)  # [B, 12]
 
-        # 色度主导性特征
+        # 鑹插害涓诲鎬х壒寰?
         cb_b = band_e[:, 1, :]
         cr_b = band_e[:, 2, :]
         chroma_dominance = (cr_b - cb_b) / (cr_b + cb_b + self.eps)  # [B, 3]
@@ -226,7 +226,7 @@ class ThreatDomainDiagnosis:
     def __init__(self, num_sources=6, num_threat_domains=3, feature_ids=None, source_names=None):
         self.num_sources = num_sources
         self.num_threat_domains = num_threat_domains
-        # 新增：支持动态攻击名称
+        # 鏂板锛氭敮鎸佸姩鎬佹敾鍑诲悕绉?
         if source_names is not None:
             self.source_names = source_names
         else:
@@ -394,12 +394,12 @@ class ThreatDomainDiagnosis:
         self.cluster_centers = (np.array(state_dict['cluster_centers'])
                                 if state_dict.get('cluster_centers') is not None else None)
 
-        # ★ [修改] 恢复特征原型，保持 EMA 连续性
+        # 鈽?[淇敼] 鎭㈠鐗瑰緛鍘熷瀷锛屼繚鎸?EMA 杩炵画鎬?
         saved_features = state_dict.get('source_features', None)
         if saved_features is not None:
             self.source_features = {}
             for k, v in saved_features.items():
-                # 确保加载到正确的设备
+                # 纭繚鍔犺浇鍒版纭殑璁惧
                 if device is not None:
                     self.source_features[int(k)] = v.to(device)
                 else:
@@ -408,9 +408,9 @@ class ThreatDomainDiagnosis:
             self.source_features = {}
 
 
-# ──────────────────────────────────────────────────────────────────────────
-#  基础模块（FDConv 仅用于指定位置）
-# ──────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  鍩虹妯″潡锛團DConv 浠呯敤浜庢寚瀹氫綅缃級
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 def conv3x3(in_planes, out_planes, stride=1, layer_name="",
             use_fdconv=False, num_domains=3, num_experts=4):
     if use_fdconv:
@@ -446,7 +446,7 @@ class BasicBlock(nn.Module):
             self.conv1 = conv3x3(in_planes, planes, stride, layer_name + "_conv1",
                                  use_fdconv=False)
 
-        # conv2：始终普通卷积
+        # conv2锛氬缁堟櫘閫氬嵎绉?
         self.conv2 = conv3x3(planes, planes, 1, layer_name + "_conv2",
                              use_fdconv=False)
 
@@ -456,15 +456,16 @@ class BasicBlock(nn.Module):
         self.downsample = downsample
         self.stride = stride
 
-    # ★ 改这里：增加 router_weights / bpda（默认不影响原逻辑）
-    def forward(self, x, domain_assignments=None, router_weights=None, bpda=False):
+    # 鈽?鏀硅繖閲岋細澧炲姞 router_weights / bpda锛堥粯璁や笉褰卞搷鍘熼€昏緫锛?
+    def forward(self, x, domain_assignments=None, router_weights=None, bpda=False, soft_forward=False):
         identity = x
         if self.conv1_is_fd:
-            # ★ 把 router_weights / bpda 传进 FDConv
+            # 鈽?鎶?router_weights / bpda 浼犺繘 FDConv
             out = self.conv1(
                 x, domain_assignments,
                 router_weights=router_weights,
-                bpda=bpda
+                bpda=bpda,
+                soft_forward=soft_forward
             )[0]
         else:
             out = self.conv1(x)
@@ -483,9 +484,9 @@ class BasicBlock(nn.Module):
         return out
 
 
-# ──────────────────────────────────────────────────────────────────────────
-#  ResNetEncoder (原 Encoder)
-# ──────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+#  ResNetEncoder (鍘?Encoder)
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 class ResNetEncoder(nn.Module):
     def __init__(self, num_sources=6, num_domains=3, fd_num_experts=3,
                  enable_band_stats=False, domain_feature_ids=None, num_classes=10,
@@ -496,40 +497,40 @@ class ResNetEncoder(nn.Module):
         self.num_sources = num_sources
         self.num_threat_domains = int(num_domains)
 
-        # 输入标准化层（根据数据集自动选择）
+        # 杈撳叆鏍囧噯鍖栧眰锛堟牴鎹暟鎹泦鑷姩閫夋嫨锛?
         if dataset in DATASET_STATS:
             stats = DATASET_STATS[dataset]
         else:
-            stats = DATASET_STATS['CIFAR100']  # 默认使用 CIFAR100
+            stats = DATASET_STATS['CIFAR100']  # 榛樿浣跨敤 CIFAR100
         self.input_normalize = InputNormalize(mean=stats['mean'], std=stats['std'])
 
-        # ★ 强制与域数一致（避免外部传入不一致）
+        # 鈽?寮哄埗涓庡煙鏁颁竴鑷达紙閬垮厤澶栭儴浼犲叆涓嶄竴鑷达級
         if int(fd_num_experts) != self.num_threat_domains:
             print(f"[INFO] fd_num_experts={fd_num_experts} -> num_domains={self.num_threat_domains}")
         self.fd_num_experts = int(self.num_threat_domains)
         self.band_stats_enabled = enable_band_stats
 
-        # ===== BPDA 开关（默认关闭，不影响原逻辑）=====
+        # ===== BPDA 寮€鍏筹紙榛樿鍏抽棴锛屼笉褰卞搷鍘熼€昏緫锛?====
         self.use_bpda = False
 
-        # Domain分类器（输出 = num_domains）
+        # Domain鍒嗙被鍣紙杈撳嚭 = num_domains锛?
         self.threat_domain_classifier = ThreatDomainClassifier(input_channels=3, num_domains=self.num_threat_domains)
 
         if source_names is None:
             source_names = ['PGD', 'ACE', 'SUB', 'STADV'] if num_sources == 4 else ['PGD', 'ACE', 'Hue', 'ReColorAdv',
                                                                                     'Light', 'UAA']
 
-        # 域管理器（聚类簇数 = num_domains）
+        # 鍩熺鐞嗗櫒锛堣仛绫荤皣鏁?= num_domains锛?
         self.threat_domain_diagnosis = ThreatDomainDiagnosis(
             num_sources=num_sources,
             num_threat_domains=self.num_threat_domains,
-            source_names=source_names  # 需要从模型构造函数传入
+            source_names=source_names  # 闇€瑕佷粠妯″瀷鏋勯€犲嚱鏁颁紶鍏?
         )
 
-        # initial conv 使用 FDConv
-        # ★ 根据数据集自动选择 stem(与主 main 一致):
-        #   ImageNet-like(Imagenette/ImageNet) → 7x7 conv stride=2 + MaxPool 3x3 stride=2 (224→56)
-        #   CIFAR-like → 3x3 conv stride=1 (32→32)
+        # initial conv 浣跨敤 FDConv
+        # 鈽?鏍规嵁鏁版嵁闆嗚嚜鍔ㄩ€夋嫨 stem(涓庝富 main 涓€鑷?:
+        #   ImageNet-like(Imagenette/ImageNet) 鈫?7x7 conv stride=2 + MaxPool 3x3 stride=2 (224鈫?6)
+        #   CIFAR-like 鈫?3x3 conv stride=1 (32鈫?2)
         _imagenet_like = dataset in ('Imagenette', 'ImageNet', 'ImageNet-100', 'Restricted_ImageNet')
         if _imagenet_like:
             self.initial_conv = nn.Sequential(
@@ -571,7 +572,7 @@ class ResNetEncoder(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
-    # ★ 给验证/攻击用的接口：开启/关闭 BPDA
+    # 鈽?缁欓獙璇?鏀诲嚮鐢ㄧ殑鎺ュ彛锛氬紑鍚?鍏抽棴 BPDA
     def set_bpda(self, enabled: bool = True):
         self.use_bpda = bool(enabled)
 
@@ -626,23 +627,29 @@ class ResNetEncoder(nn.Module):
     def get_domain_labels(self, source_ids):
         return self.threat_domain_diagnosis.get_domain_assignments(source_ids)
 
+    def set_forced_domain_route(self, route_id=None):
+        self.forced_domain_route_id = None if route_id is None else int(route_id)
+
+    def set_uniform_domain_mix(self, enabled=False):
+        self.uniform_domain_mix = bool(enabled)
+
     def count_frequency_convolutions(self):
-        """统计 FDConv 与标准卷积数量（拓扑级，不含 downsample 的 1x1）。"""
+        """Count FDConv and standard convolution modules."""
         stages = [3, 4, 6, 3]
-        fdconv_count = 1 + len(stages)    # initial(1) + 四个stage首块conv1(4)
+        fdconv_count = 1 + len(stages)    # initial(1) + 鍥涗釜stage棣栧潡conv1(4)
         standard_count = 0
-        # initial 后续没有 conv 计数
+        # initial 鍚庣画娌℃湁 conv 璁℃暟
         for n in stages:
-            # 每个 block 2 个 conv，首块的 conv1 被 FDConv 占用（不算普通卷积）
+            # 姣忎釜 block 2 涓?conv锛岄鍧楃殑 conv1 琚?FDConv 鍗犵敤锛堜笉绠楁櫘閫氬嵎绉級
             standard_count += (2 * n - 1)
-        # 加上 3 个 downsample 的 1x1
+        # 鍔犱笂 3 涓?downsample 鐨?1x1
         standard_count += 3
         total = fdconv_count + standard_count
-        print("模型卷积统计:")
-        print(f"  FDConv 数量: {fdconv_count}")
-        print(f"  标准卷积数量: {standard_count}")
-        print(f"  总卷积数量: {total}")
-        print(f"  FDConv 比例: {fdconv_count / total:.1%}")
+        print("妯″瀷鍗风Н缁熻:")
+        print(f"  FDConv 鏁伴噺: {fdconv_count}")
+        print(f"  鏍囧噯鍗风Н鏁伴噺: {standard_count}")
+        print(f"  鎬诲嵎绉暟閲? {total}")
+        print(f"  FDConv 姣斾緥: {fdconv_count / total:.1%}")
         return {'fdconv_count': fdconv_count, 'standard_count': standard_count,
                 'total_count': total, 'fdconv_ratio': fdconv_count / total}
 
@@ -654,50 +661,83 @@ class ResNetEncoder(nn.Module):
         return x * std + mean
 
     def extract_wavelet_features(self, img_pixel, source_ids):
-        # 仅用于更新域原型（像素域输入更稳）
+        # 浠呯敤浜庢洿鏂板煙鍘熷瀷锛堝儚绱犲煙杈撳叆鏇寸ǔ锛?
         return None, self.threat_domain_diagnosis.update_features(img_pixel, source_ids)
 
     def forward(self, img, branch_idx=None, criterion=None, attack_num=5, flag=0,
-                domain_ids=None, track_expert_freqs=False, skip_normalize=False):
+                domain_ids=None, track_expert_freqs=False, skip_normalize=False,
+                forced_domain_assignments=None):
 
-        # 输入标准化（模型内部自动处理）
+        # 杈撳叆鏍囧噯鍖栵紙妯″瀷鍐呴儴鑷姩澶勭悊锛?
         if not skip_normalize:
             img = self.input_normalize(img)
 
-        # 1) 预测 domain
+        # 1) 棰勬祴 domain
         domain_logits = self.threat_domain_classifier(img)              # [B, D]
         _, predicted_domains = torch.max(domain_logits, dim=1)   # hard argmax
 
-        # 路由域：训练时可用 get_domain_labels(domain_ids)，验证时 None -> predicted_domains
-        if domain_ids is not None:
+        # 璺敱鍩燂細璁粌鏃跺彲鐢?get_domain_labels(domain_ids)锛岄獙璇佹椂 None -> predicted_domains
+        if forced_domain_assignments is None:
+            forced_route_id = getattr(self, "forced_domain_route_id", None)
+            if forced_route_id is not None:
+                forced_domain_assignments = torch.full(
+                    (img.size(0),), int(forced_route_id),
+                    device=img.device, dtype=torch.long
+                )
+
+        uniform_domain_mix = bool(getattr(self, "uniform_domain_mix", False))
+
+        if uniform_domain_mix:
+            domain_assignments = torch.zeros(
+                img.size(0), device=img.device, dtype=torch.long
+            )
+        elif forced_domain_assignments is not None:
+            domain_assignments = forced_domain_assignments.to(
+                device=img.device, dtype=torch.long
+            ).clamp(0, self.num_threat_domains - 1)
+        elif domain_ids is not None:
             domain_assignments = self.get_domain_labels(domain_ids)
         else:
             domain_assignments = predicted_domains
 
-        # ★ 2) BPDA 的 soft 权重（仅用于 backward surrogate；forward 不变）
+        # 鈽?2) BPDA 鐨?soft 鏉冮噸锛堜粎鐢ㄤ簬 backward surrogate锛沠orward 涓嶅彉锛?        router_weights = None
         router_weights = None
-        if self.use_bpda:
-            router_weights = F.softmax(domain_logits, dim=1)  # [B, D]，要求 D==K
+        soft_forward = False
+        if uniform_domain_mix:
+            router_weights = domain_logits.new_full(
+                (img.size(0), self.num_threat_domains),
+                1.0 / float(self.num_threat_domains)
+            )
+            soft_forward = True
+        elif self.use_bpda and forced_domain_assignments is None:
+            router_weights = F.softmax(domain_logits, dim=1)
 
-        # 3) 初始 FDConv（把 router_weights / bpda 传进去）
+        # 3) 鍒濆 FDConv锛堟妸 router_weights / bpda 浼犺繘鍘伙級
+        if self.use_bpda and forced_domain_assignments is not None:
+            router_weights = F.one_hot(
+                domain_assignments,
+                num_classes=self.num_threat_domains
+            ).to(domain_logits.dtype)
+
         x_ini_out = self.initial_conv[0](
             img, domain_assignments,
             router_weights=router_weights,
-            bpda=self.use_bpda
+            bpda=self.use_bpda,
+            soft_forward=soft_forward
         )
         x = self.initial_conv[1:](x_ini_out[0])
 
-        # 4) 主干（所有 FDConv 的 block0 conv1 也传 router_weights / bpda）
+        # 4) 涓诲共锛堟墍鏈?FDConv 鐨?block0 conv1 涔熶紶 router_weights / bpda锛?
         for layer in self.conv_block1:
-            x = layer(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+            x = layer(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda, soft_forward=soft_forward)
         for layer in self.conv_block2:
-            x = layer(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+            x = layer(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda, soft_forward=soft_forward)
         for layer in self.conv_block3:
-            x = layer(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+            x = layer(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda, soft_forward=soft_forward)
         for layer in self.conv_block4:
-            x = layer(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+            x = layer(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda, soft_forward=soft_forward)
 
-        # 5) 分类
+        # 5) 鍒嗙被
         out = self.fc(self.avgpool(x).view(x.size(0), -1))
 
         merged_expert_freqs = (x_ini_out[1] if isinstance(x_ini_out, tuple) and len(x_ini_out) > 1 else
@@ -705,7 +745,7 @@ class ResNetEncoder(nn.Module):
                                 for i in range(self.num_threat_domains)})
 
         return out, merged_expert_freqs, domain_logits, predicted_domains
-    # 保存/加载（含域管理器状态）
+    # 淇濆瓨/鍔犺浇锛堝惈鍩熺鐞嗗櫒鐘舵€侊級
     def state_dict(self, destination=None, prefix='', keep_vars=False):
         sd = super().state_dict(destination, prefix, keep_vars)
         sd[prefix + 'threat_domain_diagnosis_state'] = self.threat_domain_diagnosis.get_state_dict()
@@ -718,13 +758,13 @@ class ResNetEncoder(nn.Module):
             device = next(self.parameters()).device
             self.threat_domain_diagnosis.load_state_dict(gdm, device)
         if strict and (len(missing) > 0 or len(unexpected) > 0):
-            raise RuntimeError(f"错误加载状态字典: 缺少键: {missing}, 意外键: {unexpected}")
+            raise RuntimeError(f"閿欒鍔犺浇鐘舵€佸瓧鍏? 缂哄皯閿? {missing}, 鎰忓閿? {unexpected}")
         return missing, unexpected
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MobileViT 专用组件
-# ══════════════════════════════════════════════════════════════════════════════
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+#  MobileViT 涓撶敤缁勪欢
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
 try:
     from einops import rearrange
     EINOPS_AVAILABLE = True
@@ -830,10 +870,15 @@ class MV2Block(nn.Module):
         self.pw2 = nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False)
         self.pw2_bn = nn.BatchNorm2d(oup)
 
-    def forward(self, x, domain_assignments=None, router_weights=None, bpda=False):
+    def forward(self, x, domain_assignments=None, router_weights=None, bpda=False, soft_forward=False):
         out = self.pw1(x)
         if self.use_fdconv_dw:
-            out = self.dw(out, domain_assignments, router_weights=router_weights, bpda=bpda)[0]
+            out = self.dw(
+                out, domain_assignments,
+                router_weights=router_weights,
+                bpda=bpda,
+                soft_forward=soft_forward
+            )[0]
             out = self.dw_bn(out); out = self.dw_act(out)
         else:
             out = self.dw(out); out = self.dw_bn(out); out = self.dw_act(out)
@@ -849,9 +894,9 @@ class MobileViTBlock(nn.Module):
                  use_fdconv_conv1=False, num_domains=3, fd_num_experts=3):
         super().__init__()
         self.ph, self.pw = patch_size
-        # ★ TaFD 专家定调(与 ResNet "stage 头部满卷积专家、主体共享" 一致):
-        #   把 transformer 阶段的入口局部表征卷积 conv1 换成 FDConv(满卷积, 按域路由);
-        #   attention/FeedForward 主体保持共享(不动 transformer)。
+        # 鈽?TaFD 涓撳瀹氳皟(涓?ResNet "stage 澶撮儴婊″嵎绉笓瀹躲€佷富浣撳叡浜? 涓€鑷?:
+        #   鎶?transformer 闃舵鐨勫叆鍙ｅ眬閮ㄨ〃寰佸嵎绉?conv1 鎹㈡垚 FDConv(婊″嵎绉? 鎸夊煙璺敱);
+        #   attention/FeedForward 涓讳綋淇濇寔鍏变韩(涓嶅姩 transformer)銆?
         self.use_fdconv_conv1 = bool(use_fdconv_conv1)
         self.num_domains = int(num_domains)
         self.fd_num_experts = int(fd_num_experts)
@@ -866,10 +911,15 @@ class MobileViTBlock(nn.Module):
         self.transformer = Transformer(dim, depth, 1, 32, mlp_dim, dropout)
         self.conv3 = conv_1x1_bn(dim, channel)
         self.conv4 = conv_nxn_bn(2 * channel, channel, kernel_size)
-    def forward(self, x, domain_assignments=None, router_weights=None, bpda=False):
+    def forward(self, x, domain_assignments=None, router_weights=None, bpda=False, soft_forward=False):
         y = x.clone()
         if self.use_fdconv_conv1:
-            x = self.conv1_fd(x, domain_assignments, router_weights=router_weights, bpda=bpda)[0]
+            x = self.conv1_fd(
+                x, domain_assignments,
+                router_weights=router_weights,
+                bpda=bpda,
+                soft_forward=soft_forward
+            )[0]
             x = self.conv1_bn(x); x = self.conv1_act(x)
         else:
             x = self.conv1(x)
@@ -885,9 +935,9 @@ class MobileViTBlock(nn.Module):
         return x
 
 
-# ──────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 #  MobileViTEncoder
-# ──────────────────────────────────────────────────────────────────────────
+# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 class MobileViTEncoder(nn.Module):
     def __init__(self, size=32, num_classes=10,
                  num_sources=6, num_domains=3, fd_num_experts=3,
@@ -906,22 +956,22 @@ class MobileViTEncoder(nn.Module):
             print(f"[INFO] fd_num_experts={fd_num_experts} -> num_domains={self.num_threat_domains}")
         self.fd_num_experts = int(self.num_threat_domains)
 
-        # 输入标准化层（根据数据集自动选择）
+        # 杈撳叆鏍囧噯鍖栧眰锛堟牴鎹暟鎹泦鑷姩閫夋嫨锛?
         if dataset in DATASET_STATS:
             stats = DATASET_STATS[dataset]
         else:
-            stats = DATASET_STATS['CIFAR100']  # 默认使用 CIFAR100
+            stats = DATASET_STATS['CIFAR100']  # 榛樿浣跨敤 CIFAR100
         self.input_normalize = InputNormalize(mean=stats['mean'], std=stats['std'])
 
         self.band_stats_enabled = enable_band_stats
         self.replace_mode = replace_mode
 
-        # BPDA 开关
+        # BPDA 寮€鍏?
         self.use_bpda = False
 
         self.threat_domain_classifier = ThreatDomainClassifier(input_channels=3, num_domains=self.num_threat_domains)
 
-        # 与 ResNetEncoder 保持一致：根据 num_sources 设置攻击名称
+        # 涓?ResNetEncoder 淇濇寔涓€鑷达細鏍规嵁 num_sources 璁剧疆鏀诲嚮鍚嶇О
         if source_names is None:
             source_names = ['PGD', 'ACE', 'SUB', 'STADV'] if num_sources == 4 else ['PGD', 'ACE', 'Hue', 'ReColorAdv', 'Light', 'UAA']
         self.threat_domain_diagnosis = ThreatDomainDiagnosis(
@@ -953,8 +1003,8 @@ class MobileViTEncoder(nn.Module):
         def _use_fd_dw(idx):
             return (idx in self.fdconv_stage_indices) and (self.replace_mode == 'dw')
 
-        # ★ 224 输入(Imagenette/ImageNet) 适配(与主 main 一致): mv2[0] stride=2, 早期多一次下采样,
-        #   让进 mvit transformer 的特征图从 56×56 降到 28×28(attention 量级降 16 倍); 32输入(CIFAR)行为不变。
+        # 鈽?224 杈撳叆(Imagenette/ImageNet) 閫傞厤(涓庝富 main 涓€鑷?: mv2[0] stride=2, 鏃╂湡澶氫竴娆′笅閲囨牱,
+        #   璁╄繘 mvit transformer 鐨勭壒寰佸浘浠?56脳56 闄嶅埌 28脳28(attention 閲忕骇闄?16 鍊?; 32杈撳叆(CIFAR)琛屼负涓嶅彉銆?
         _imagenet_like = dataset in ('Imagenette', 'ImageNet', 'ImageNet-100', 'Restricted_ImageNet')
         _mv2_0_stride = 2 if _imagenet_like else 1
 
@@ -981,7 +1031,7 @@ class MobileViTEncoder(nn.Module):
         self.mvit.append(MobileViTBlock(dims[2], L[2], channels[9], kernel_size, patch_size, int(dims[2] * 4), **_mv_kw))
 
         self.conv2 = conv_1x1_bn(channels[-2], channels[-1])
-        # ★ 自适应池化(与主 main 一致): 32输入下等价 AvgPool2d(4,1); 224/Imagenette 下能把任意空间尺寸→1×1
+        # 鈽?鑷€傚簲姹犲寲(涓庝富 main 涓€鑷?: 32杈撳叆涓嬬瓑浠?AvgPool2d(4,1); 224/Imagenette 涓嬭兘鎶婁换鎰忕┖闂村昂瀵糕啋1脳1
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(channels[-1], num_classes, bias=False)
 
@@ -1020,6 +1070,12 @@ class MobileViTEncoder(nn.Module):
     def get_domain_labels(self, source_ids):
         return self.threat_domain_diagnosis.get_domain_assignments(source_ids)
 
+    def set_forced_domain_route(self, route_id=None):
+        self.forced_domain_route_id = None if route_id is None else int(route_id)
+
+    def set_uniform_domain_mix(self, enabled=False):
+        self.uniform_domain_mix = bool(enabled)
+
     def count_frequency_convolutions(self):
         fdconv_count = 0
         conv2d_count = 0
@@ -1031,11 +1087,11 @@ class MobileViTEncoder(nn.Module):
                     continue
                 conv2d_count += 1
         total = fdconv_count + conv2d_count
-        print("模型卷积统计 (排除 FDConv 内部 expert/residual):")
-        print(f"  FDConv 数量: {fdconv_count}")
-        print(f"  标准 Conv2d 数量: {conv2d_count}")
-        print(f"  总卷积数量: {total}")
-        print(f"  FDConv 比例: {fdconv_count / total:.1%}" if total > 0 else "  FDConv 比例: N/A")
+        print("妯″瀷鍗风Н缁熻 (鎺掗櫎 FDConv 鍐呴儴 expert/residual):")
+        print(f"  FDConv 鏁伴噺: {fdconv_count}")
+        print(f"  鏍囧噯 Conv2d 鏁伴噺: {conv2d_count}")
+        print(f"  鎬诲嵎绉暟閲? {total}")
+        print(f"  FDConv 姣斾緥: {fdconv_count / total:.1%}" if total > 0 else "  FDConv 姣斾緥: N/A")
         return {'fdconv_count': fdconv_count, 'standard_count': conv2d_count,
                 'total_count': total, 'fdconv_ratio': (fdconv_count / total if total > 0 else 0.0)}
 
@@ -1050,46 +1106,84 @@ class MobileViTEncoder(nn.Module):
         return None, self.threat_domain_diagnosis.update_features(img_pixel, source_ids)
 
     def forward(self, img, branch_idx=None, criterion=None, attack_num=5, flag=0,
-                domain_ids=None, track_expert_freqs=False, skip_normalize=False):
+                domain_ids=None, track_expert_freqs=False, skip_normalize=False,
+                forced_domain_assignments=None):
 
-        # 输入标准化（模型内部自动处理）
+        # 杈撳叆鏍囧噯鍖栵紙妯″瀷鍐呴儴鑷姩澶勭悊锛?
         if not skip_normalize:
             img = self.input_normalize(img)
 
         domain_logits = self.threat_domain_classifier(img)
         _, predicted_domains = torch.max(domain_logits, dim=1)
 
-        # 路由域：训练时用聚类映射，验证时用预测域
-        if domain_ids is not None:
+        # 璺敱鍩燂細璁粌鏃剁敤鑱氱被鏄犲皠锛岄獙璇佹椂鐢ㄩ娴嬪煙
+        if forced_domain_assignments is None:
+            forced_route_id = getattr(self, "forced_domain_route_id", None)
+            if forced_route_id is not None:
+                forced_domain_assignments = torch.full(
+                    (img.size(0),), int(forced_route_id),
+                    device=img.device, dtype=torch.long
+                )
+
+        uniform_domain_mix = bool(getattr(self, "uniform_domain_mix", False))
+
+        if uniform_domain_mix:
+            domain_assignments = torch.zeros(
+                img.size(0), device=img.device, dtype=torch.long
+            )
+        elif forced_domain_assignments is not None:
+            domain_assignments = forced_domain_assignments.to(
+                device=img.device, dtype=torch.long
+            ).clamp(0, self.num_threat_domains - 1)
+        elif domain_ids is not None:
             domain_assignments = self.get_domain_labels(domain_ids)
         else:
             domain_assignments = predicted_domains
 
         router_weights = None
-        if self.use_bpda:
+        router_weights = None
+        soft_forward = False
+        if uniform_domain_mix:
+            router_weights = domain_logits.new_full(
+                (img.size(0), self.num_threat_domains),
+                1.0 / float(self.num_threat_domains)
+            )
+            soft_forward = True
+        elif self.use_bpda and forced_domain_assignments is None:
             router_weights = F.softmax(domain_logits, dim=1)
+
+        if self.use_bpda and forced_domain_assignments is not None:
+            router_weights = F.one_hot(
+                domain_assignments,
+                num_classes=self.num_threat_domains
+            ).to(domain_logits.dtype)
 
         if self.use_fdconv_stem:
             stem_out = self.conv1[0](img, domain_assignments,
-                                      router_weights=router_weights, bpda=self.use_bpda)
+                                      router_weights=router_weights, bpda=self.use_bpda,
+                                      soft_forward=soft_forward)
             x = self.conv1[1:](stem_out[0])
         else:
             x = self.conv1(img)
 
         for i, blk in enumerate(self.mv2):
-            x = blk(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+            x = blk(x, domain_assignments, router_weights=router_weights,
+                    bpda=self.use_bpda, soft_forward=soft_forward)
             if i == 4:
-                x = self.mvit[0](x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+                x = self.mvit[0](x, domain_assignments, router_weights=router_weights,
+                                 bpda=self.use_bpda, soft_forward=soft_forward)
             if i == 5:
-                x = self.mvit[1](x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+                x = self.mvit[1](x, domain_assignments, router_weights=router_weights,
+                                 bpda=self.use_bpda, soft_forward=soft_forward)
             if i == 6:
-                x = self.mvit[2](x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+                x = self.mvit[2](x, domain_assignments, router_weights=router_weights,
+                                 bpda=self.use_bpda, soft_forward=soft_forward)
 
         x_feature = self.conv2(x)
         pooled = self.pool(x_feature).view(-1, x_feature.shape[1])
         out = self.fc(pooled)
 
-        # 与 ResNetEncoder 保持一致：返回 expert_freqs（从 stem FDConv 获取）
+        # 涓?ResNetEncoder 淇濇寔涓€鑷达細杩斿洖 expert_freqs锛堜粠 stem FDConv 鑾峰彇锛?
         merged_expert_freqs = (stem_out[1] if self.use_fdconv_stem and isinstance(stem_out, tuple) and len(stem_out) > 1 else
                                {f'domain_{i}': torch.zeros(1, self.fd_num_experts, device=img.device)
                                 for i in range(self.num_threat_domains)})
@@ -1108,25 +1202,15 @@ class MobileViTEncoder(nn.Module):
             device = next(self.parameters()).device
             self.threat_domain_diagnosis.load_state_dict(gdm, device)
         if strict and (len(missing) > 0 or len(unexpected) > 0):
-            raise RuntimeError(f"错误加载状态字典: 缺少键: {missing}, 意外键: {unexpected}")
+            raise RuntimeError(f"閿欒鍔犺浇鐘舵€佸瓧鍏? 缂哄皯閿? {missing}, 鎰忓閿? {unexpected}")
         return missing, unexpected
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  工厂函数 & 兼容别名
-# ══════════════════════════════════════════════════════════════════════════════
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+#  宸ュ巶鍑芥暟 & 鍏煎鍒悕
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
 def create_encoder(backbone='resnet', dataset=None, **kwargs):
-    """
-    根据 backbone 参数创建对应的 Encoder
-
-    Args:
-        backbone: 'resnet' 或 'mobilevit'
-        dataset: 数据集名称，用于自动选择标准化参数
-        **kwargs: num_sources, num_domains, fd_num_experts, num_classes, ...
-
-    Returns:
-        Encoder 实例
-    """
+    """Create the requested encoder backbone."""
     kwargs['dataset'] = dataset
     if backbone == 'resnet':
         return ResNetEncoder(**kwargs)
@@ -1138,5 +1222,6 @@ def create_encoder(backbone='resnet', dataset=None, **kwargs):
         raise ValueError(f"Unknown backbone: {backbone}. Choose 'resnet' or 'mobilevit'.")
 
 
-# 兼容性别名
+# 鍏煎鎬у埆鍚?
 Encoder = ResNetEncoder
+

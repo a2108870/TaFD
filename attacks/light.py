@@ -1,4 +1,6 @@
 import torch
+import numpy as np
+import torch.nn as nn
 import kornia as K
 
 
@@ -36,10 +38,10 @@ def CF(img, param, steps):
     return total_image
 
 
-def ala_atk(input, y, model, device, lr=1, max_iterations=10, steps=64, bound=16, ncls=10,
-            norm_mean=None, norm_std=None):
+def light_atk(input, y, model, device, lr=1, max_iterations=10, steps=64, bound=16, ncls=10,
+              norm_mean=None, norm_std=None):
     """
-    ALA (Adversarial Lightness Attack) function.
+    Light attack function.
     Note: Model handles normalization internally, so input should be in [0,1] pixel domain.
     norm_mean and norm_std parameters are kept for API compatibility but not used.
     """

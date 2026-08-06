@@ -1,15 +1,13 @@
 
 # -*- coding: utf-8 -*-
 """
-FDConv (drop-in) with:
-- rFFT routing on Zernike/ZCH basis
-- Correct reshape using conv output H2/W2 (fixes shape invalid errors)
-- Concentric-ring init using ONLY Zernike R2^0 + per-expert bias
-  (others init to 0 but remain trainable)
+FDConv direct-mask ablation (drop-in) with:
+- rFFT routing on directly learned frequency masks
+- Per-resolution lazy mask embeddings
 - Hard routing: num_domains == num_experts, compute K paths,
-  then select by sample domain index (no weighted fusion)
+  then select by sample domain index
 
-Usage: from models.fdconv import FDConv
+Usage: from models.fdconv_directMask import FCConv
 """
 
 import math
@@ -145,11 +143,12 @@ class ZernikeBasisCache:
 # ==================== FC-Conv Module ====================
 class FCConv(nn.Module):
     """
-    Frequency-Conditional Convolution (FC-Conv) with hard routing.
+    Frequency-Conditional Convolution (FC-Conv) with direct spectral masks.
 
-    Processing pipeline:
-    rFFT -> Zernike basis -> per-domain spectral masks -> iFFT -> K-expert conv
-         -> hard routing by threat-domain index -> residual
+    Ablation idea:
+    - remove Zernike-basis mask parameterization
+    - directly learn full-resolution spectral masks per threat domain
+    - keep the rest of FC-Conv routing / residual / BPDA interface unchanged
     """
 
     # Zernike basis configuration
@@ -213,40 +212,14 @@ class FCConv(nn.Module):
 
         self.bias_param = nn.Parameter(torch.zeros(out_channels)) if bias else None
 
-        # Zernike basis configuration (instance-level)
-        self.n_max = self.DEFAULT_N_MAX
-        self.m_max = self.DEFAULT_M_MAX
         self.softmax_temperature = self.DEFAULT_SOFTMAX_TEMP
-        self.num_basis_functions = _zernike_basis_dim(self.n_max, self.m_max)
 
-        # Threat-domain embedding: each domain has vector of length K*(M+1)
-        self.threat_domain_embedding = nn.Embedding(
-            self.num_threat_domains,
-            self.K * (self.num_basis_functions + 1)
-        )
-        nn.init.zeros_(self.threat_domain_embedding.weight)
-
-        # Zernike basis cache (with n_max, m_max)
-        self._basis_cache = ZernikeBasisCache(max_items=freq_cache_items, n_max=self.n_max, m_max=self.m_max)
+        # Direct-mask ablation: one lazy embedding per input resolution.
+        # key: "HxW", value: nn.Embedding[num_domains, K * H_f * W_f]
+        self.direct_mask_embeddings = nn.ModuleDict()
 
     def _get_radial_basis_indices(self):
-        """Get indices of radial (m=0) basis functions."""
-        indices = []
-        cur = 0
-
-        for n in range(self.n_max + 1):
-            m_top = min(n, self.m_max)
-            for m in range(m_top + 1):
-                if (n - m) % 2 != 0:
-                    continue
-
-                if m == 0:
-                    indices.append((n, cur))
-                    cur += 1
-                else:
-                    cur += 2
-
-        return indices
+        return []
 
     @torch.no_grad()
     def init_spectral_masks(
@@ -257,7 +230,7 @@ class FCConv(nn.Module):
             gain: float = 12.0
     ):
         """
-        Initialize spectral masks using concentric rings (R2^0 + bias).
+        Initialize direct-mask parameters for a reference resolution.
 
         Args:
             H_ref: Reference height
@@ -265,61 +238,40 @@ class FCConv(nn.Module):
             mode: 'equal_radius' or 'equal_area'
             gain: Gain factor for slopes
         """
-        device = self.threat_domain_embedding.weight.device
-        K = self.K
-        M_full = self.num_basis_functions
-
-        # Find R2^0 index in basis sequence
-        radial_indices = self._get_radial_basis_indices()
-        defocus_idx = next((idx for (n, idx) in radial_indices if n == 2), None)
-
-        if defocus_idx is None:
-            raise RuntimeError("R_2^0 not available; ensure n_max>=2.")
-
-        # Compute RMS normalization factor for (2r^2-1) on rFFT half-plane
-        Bset, Bflat, rn = self._basis_cache.get_zernike_basis(H_ref, W_ref, device)
-        s_unnorm = 2.0 * (rn ** 2) - 1.0
-        s_rms = torch.sqrt((s_unnorm ** 2).mean()).item()
-
-        # Target radii boundaries
-        if mode == "equal_radius":
-            r_bounds = [k / K for k in range(1, K)]
-        elif mode == "equal_area":
-            r_bounds = [(k / K) ** 0.5 for k in range(1, K)]
-        else:
-            raise ValueError("mode must be 'equal_radius' or 'equal_area'")
-
-        # Map to normalized basis values
-        s_bounds_norm = [(2 * (r * r) - 1.0) / s_rms for r in r_bounds]
-
-        # Slopes and intercepts (monotonic b_k, recursive a_k)
-        b = torch.linspace(-1.0, 1.0, K, device=device) * gain
-        a = torch.zeros(K, device=device)
-
-        for k in range(K - 1):
-            a[k + 1] = a[k] + (b[k] - b[k + 1]) * s_bounds_norm[k]
-
-        # Write to embedding: bias=a; only R2^0 dim set to b; others=0 (learnable)
-        params = torch.zeros(K, M_full + 1, device=device)
-        params[:, 0] = a
-        params[:, 1 + defocus_idx] = b
-        flat = params.reshape(-1)
-
-        for d in range(self.num_threat_domains):
-            self.threat_domain_embedding.weight[d] = flat.clone()
+        device = self.bias_param.device if self.bias_param is not None else self.residual_conv.weight.device
+        embedding, h_f, w_f = self._get_or_create_direct_mask_embedding(H_ref, W_ref, device)
+        nn.init.zeros_(embedding.weight)
 
         return {
             "mode": mode,
             "gain": float(gain),
             "H_ref": int(H_ref),
             "W_ref": int(W_ref),
-            "r_bounds": [float(x) for x in r_bounds],
-            "s_rms": float(s_rms),
-            "a": [float(x) for x in a],
-            "b": [float(x) for x in b],
-            "R20_index": int(defocus_idx),
-            "NUM_BASIS": int(M_full),
+            "H_f": int(h_f),
+            "W_f": int(w_f),
+            "mask_param_shape": list(embedding.weight.shape),
         }
+
+    def _get_or_create_direct_mask_embedding(
+            self,
+            h: int,
+            w: int,
+            device: torch.device,
+    ):
+        key = f"{h}x{w}"
+        h_f = h
+        w_f = (w // 2) + 1
+        mask_dims = h_f * w_f
+
+        if key not in self.direct_mask_embeddings:
+            embedding = nn.Embedding(
+                self.num_threat_domains,
+                self.K * mask_dims,
+            )
+            nn.init.zeros_(embedding.weight)
+            self.direct_mask_embeddings[key] = embedding.to(device)
+
+        return self.direct_mask_embeddings[key], h_f, w_f
 
     def _compute_spectral_masks(
             self,
@@ -337,11 +289,10 @@ class FCConv(nn.Module):
             spectral_masks: [B, K, 1, H, W'] frequency masks
         """
         B_batch = threat_domain_index.shape[0]
-        Bset, Bflat, _ = self._basis_cache.get_zernike_basis(h, w, device)
-        H_f, W_f = h, Bset.shape[-1]
+        mask_embedding, H_f, W_f = self._get_or_create_direct_mask_embedding(h, w, device)
+        mask_dims = H_f * W_f
 
-        # Threat-domain embedding: forward uses hard lookup; backward uses soft mixture
-        params_hard = self.threat_domain_embedding(threat_domain_index)  # [B, K*(M+1)]
+        params_hard = mask_embedding(threat_domain_index)  # [B, K*H_f*W_f]
 
         use_soft = (
             bool(bpda)
@@ -352,24 +303,18 @@ class FCConv(nn.Module):
         )
 
         if use_soft:
-            # soft domain embedding = w @ Embedding.weight
-            W = self.threat_domain_embedding.weight.detach()              # [D, K*(M+1)]
-            rw = router_weights.to(W.dtype)                         # [B, D]
-            params_soft = rw @ W                                          # [B, K*(M+1)]
+            weight_table = mask_embedding.weight.detach()  # [D, K*H_f*W_f]
+            rw = router_weights.to(weight_table.dtype)
+            params_soft = rw @ weight_table
 
             # BPDA detach trick: forward == hard; backward gradient from soft
             params_flat = params_hard.detach() - params_soft.detach() + params_soft
         else:
             params_flat = params_hard
 
-        params = params_flat.view(B_batch, self.K, self.num_basis_functions + 1)
-        bias = params[..., 0]   # a_k
-        C = params[..., 1:]     # Zernike coeffs
-
-        # scores -> softmax masks
-        S_flat = torch.matmul(C, Bflat) + bias.unsqueeze(-1)  # [B, K, H*W']
+        params = params_flat.view(B_batch, self.K, mask_dims)
         spectral_masks_flat = F.softmax(
-            S_flat / max(self.softmax_temperature, 1e-8),
+            params / max(self.softmax_temperature, 1e-8),
             dim=1
         )
         spectral_masks = spectral_masks_flat.view(B_batch, self.K, H_f, W_f).unsqueeze(2)
@@ -383,16 +328,11 @@ class FCConv(nn.Module):
             unique_domains: torch.Tensor,
     ):
         num_unique = unique_domains.numel()
-        _, Bflat, _ = self._basis_cache.get_zernike_basis(h, w, device)
-        H_f = h
-        W_f = Bflat.shape[-1] // h
+        mask_embedding, H_f, W_f = self._get_or_create_direct_mask_embedding(h, w, device)
+        mask_dims = H_f * W_f
 
-        params_flat = self.threat_domain_embedding(unique_domains)
-        params = params_flat.view(num_unique, self.K, self.num_basis_functions + 1)
-        bias = params[..., 0]
-        coeffs = params[..., 1:]
-
-        scores = torch.matmul(coeffs, Bflat) + bias.unsqueeze(-1)
+        params_flat = mask_embedding(unique_domains)
+        scores = params_flat.view(num_unique, self.K, mask_dims)
         spectral_masks = F.softmax(
             scores / max(self.softmax_temperature, 1e-8),
             dim=1,

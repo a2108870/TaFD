@@ -402,50 +402,21 @@ class FCConv(nn.Module):
         return selected_masks.view(num_unique, 1, 1, H_f, W_f)
 
     def _forward_hard_exact(self, x: torch.Tensor, threat_domain_index: torch.Tensor):
-        B, C_in, H, W = x.shape
-        device = x.device
+        B, _, _, _ = x.shape
 
-        x_fft = torch.fft.rfft2(x, norm='ortho')
-        unique_domains = torch.unique(threat_domain_index, sorted=False)
-        unique_selected_masks = self._compute_unique_selected_spectral_masks(H, W, device, unique_domains)
+        bands_flat = x.repeat(1, self.K, 1, 1)
+        expert_out_flat = self.dedicated_experts(bands_flat)
+        H2, W2 = expert_out_flat.shape[-2], expert_out_flat.shape[-1]
+        expert_out = expert_out_flat.view(B, self.K, self.out_channels, H2, W2)
 
-        H2 = W2 = None
-        y_hard = None
+        batch_idx = torch.arange(B, device=expert_out.device)
+        y_hard = expert_out[batch_idx, threat_domain_index, :, :, :]
+
         expert_usage = {}
-        selected_masks_batch = torch.empty(
-            B,
-            1,
-            1,
-            unique_selected_masks.size(-2),
-            unique_selected_masks.size(-1),
-            device=x.device,
-            dtype=unique_selected_masks.dtype,
-        )
-        for unique_idx, domain_id in enumerate(unique_domains.tolist()):
-            sample_mask = (threat_domain_index == domain_id)
-            x_domain_fft = x_fft[sample_mask]
-            selected_mask = unique_selected_masks[unique_idx:unique_idx + 1]
-            selected_masks_batch[sample_mask] = selected_mask
-            x_domain = torch.fft.irfft2(x_domain_fft.unsqueeze(1) * selected_mask, s=(H, W), norm='ortho').squeeze(1)
-            weight_start = domain_id * self.out_channels
-            weight_end = (domain_id + 1) * self.out_channels
-            expert_weight = self.dedicated_experts.weight[weight_start:weight_end]
-            expert_out = F.conv2d(
-                x_domain,
-                expert_weight,
-                bias=None,
-                stride=self.stride,
-                padding=self.padding,
-                dilation=self.dilation,
-                groups=self.base_groups,
-            )
-            if y_hard is None:
-                H2, W2 = expert_out.shape[-2:]
-                y_hard = torch.empty(B, self.out_channels, H2, W2, device=x.device, dtype=expert_out.dtype)
-            y_hard[sample_mask] = expert_out
+        for d in torch.unique(threat_domain_index, sorted=False).tolist():
             v = torch.zeros(self.K, device=x.device)
-            v[domain_id] = 1.0
-            expert_usage[f'domain_{domain_id}'] = v
+            v[d] = 1.0
+            expert_usage[f'domain_{d}'] = v
 
         residual = self.residual_conv(x)
         out = residual + y_hard
@@ -453,7 +424,7 @@ class FCConv(nn.Module):
         if self.bias_param is not None:
             out = out + self.bias_param.view(1, -1, 1, 1)
 
-        return out, expert_usage, selected_masks_batch
+        return out, expert_usage, None
 
     def forward(self, x, threat_domain_index=None, router_weights=None, bpda: bool = False, *_, **kwargs):
         """
@@ -490,23 +461,8 @@ class FCConv(nn.Module):
         if not use_soft:
             return self._forward_hard_exact(x, threat_domain_index)
 
-        # 1) rFFT
-        x_fft = torch.fft.rfft2(x, norm='ortho')  # [B, C, H, W']
-
-        # 2) Spectral masks (BPDA: embedding backward uses soft)
-        spectral_masks = self._compute_spectral_masks(
-            H, W, device,
-            threat_domain_index=threat_domain_index,
-            router_weights=router_weights,
-            bpda=bpda
-        )
-        Xk = (x_fft.unsqueeze(1) * spectral_masks).reshape(B * self.K, C_in, H, spectral_masks.size(-1))
-
-        # 3) iFFT
-        bands_flat = torch.fft.irfft2(Xk, s=(H, W), norm='ortho').reshape(B, self.K * C_in, H, W)
-
-        # 4) Expert conv (parallel K paths)
-        expert_out_flat = self.dedicated_experts(bands_flat)  # [B, K*C_out, H2, W2]
+        bands_flat = x.repeat(1, self.K, 1, 1)
+        expert_out_flat = self.dedicated_experts(bands_flat)
         H2, W2 = expert_out_flat.shape[-2], expert_out_flat.shape[-1]
         expert_out = expert_out_flat.view(B, self.K, self.out_channels, H2, W2)
 
@@ -535,4 +491,4 @@ class FCConv(nn.Module):
                 v[d] = 1.0
                 expert_usage[f'domain_{d}'] = v
 
-        return out, expert_usage, spectral_masks
+        return out, expert_usage, None

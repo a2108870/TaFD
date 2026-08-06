@@ -20,12 +20,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.fdconv import FCConv
+from models.fdconv_woHungary import FCConv
 
 # 动态聚类
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
-from scipy.optimize import linear_sum_assignment
 from sklearn.preprocessing import StandardScaler
 
 
@@ -282,38 +281,6 @@ class ThreatDomainDiagnosis:
                     self.source_counts[d_int] = int(mask.sum().item())
             return True
 
-    def apply_hungarian_matching(self, new_labels, valid_sources, num_clusters=None):
-        if self.previous_clustering is None:
-            self.previous_clustering = {source: lab for source, lab in zip(valid_sources, new_labels)}
-            if 0 in valid_sources:
-                pgd_idx = valid_sources.index(0)
-                pgd_cluster = new_labels[pgd_idx]
-                if pgd_cluster != 0:
-                    mapping = {pgd_cluster: 0, 0: pgd_cluster}
-                    adjusted = {}
-                    for i, source in enumerate(valid_sources):
-                        lab = new_labels[i]
-                        adjusted[source] = mapping.get(lab, lab)
-                    self.previous_clustering = adjusted
-            return {source: self.previous_clustering[source] for source in valid_sources}
-
-        if num_clusters is None:
-            num_clusters = max(int(np.max(new_labels)) + 1, 1)
-        cost = np.zeros((num_clusters, num_clusters))
-        for i in range(num_clusters):
-            for j in range(num_clusters):
-                mismatch = 0
-                for idx, source in enumerate(valid_sources):
-                    if source in self.previous_clustering:
-                        if new_labels[idx] == i and self.previous_clustering[source] != j:
-                            mismatch += 1
-                cost[i, j] = mismatch
-        row_ind, col_ind = linear_sum_assignment(cost)
-        label_mapping = {i: col_ind[i] for i in range(num_clusters)}
-        adjusted = {source: label_mapping[new_labels[i]] for i, source in enumerate(valid_sources)}
-        self.previous_clustering = adjusted.copy()
-        return adjusted
-
     def update_domain_mapping(self, epoch=None, total_epochs=None):
         if epoch is not None and epoch != self.last_update_epoch:
             self.last_update_epoch = epoch
@@ -344,13 +311,12 @@ class ThreatDomainDiagnosis:
                 )
                 self.cluster_count_warning_emitted = True
 
-        kmeans = KMeans(n_clusters=active_num_clusters, random_state=42, n_init=10)
+        kmeans = KMeans(n_clusters=active_num_clusters, n_init=10)
         labels = kmeans.fit_predict(feats_red)
 
         self.cluster_centers = kmeans.cluster_centers_
 
-        adjusted = self.apply_hungarian_matching(labels, valid_sources, num_clusters=active_num_clusters)
-        for source, domain_id in adjusted.items():
+        for source, domain_id in zip(valid_sources, labels):
             self.source_to_domain[source] = int(domain_id)
 
         self.mapping_ever_updated = True
@@ -527,27 +493,13 @@ class ResNetEncoder(nn.Module):
         )
 
         # initial conv 使用 FDConv
-        # ★ 根据数据集自动选择 stem(与主 main 一致):
-        #   ImageNet-like(Imagenette/ImageNet) → 7x7 conv stride=2 + MaxPool 3x3 stride=2 (224→56)
-        #   CIFAR-like → 3x3 conv stride=1 (32→32)
-        _imagenet_like = dataset in ('Imagenette', 'ImageNet', 'ImageNet-100', 'Restricted_ImageNet')
-        if _imagenet_like:
-            self.initial_conv = nn.Sequential(
-                FCConv(3, 64, kernel_size=7, stride=2, padding=3, bias=False,
-                       num_domains=self.num_threat_domains,
-                       num_experts=self.fd_num_experts),
-                nn.BatchNorm2d(64),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
-            )
-        else:
-            self.initial_conv = nn.Sequential(
-                FCConv(3, 64, 3, 1, 1, bias=False,
-                       num_domains=self.num_threat_domains,
-                       num_experts=self.fd_num_experts),
-                nn.BatchNorm2d(64),
-                nn.ReLU(inplace=True)
-            )
+        self.initial_conv = nn.Sequential(
+            FCConv(3, 64, 3, 1, 1, bias=False,
+                   num_domains=self.num_threat_domains,
+                   num_experts=self.fd_num_experts),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
 
         layers = [3, 4, 6, 3]
         self.conv_block1 = self._make_layer(block, 64,  layers[0], stride=1, layer_name="conv_block1",
@@ -845,34 +797,17 @@ class MV2Block(nn.Module):
             return out
 
 class MobileViTBlock(nn.Module):
-    def __init__(self, dim, depth, channel, kernel_size, patch_size, mlp_dim, dropout=0.0,
-                 use_fdconv_conv1=False, num_domains=3, fd_num_experts=3):
+    def __init__(self, dim, depth, channel, kernel_size, patch_size, mlp_dim, dropout=0.0):
         super().__init__()
         self.ph, self.pw = patch_size
-        # ★ TaFD 专家定调(与 ResNet "stage 头部满卷积专家、主体共享" 一致):
-        #   把 transformer 阶段的入口局部表征卷积 conv1 换成 FDConv(满卷积, 按域路由);
-        #   attention/FeedForward 主体保持共享(不动 transformer)。
-        self.use_fdconv_conv1 = bool(use_fdconv_conv1)
-        self.num_domains = int(num_domains)
-        self.fd_num_experts = int(fd_num_experts)
-        if self.use_fdconv_conv1:
-            self.conv1_fd = FCConv(channel, channel, kernel_size, stride=1, padding=1, groups=1, bias=False,
-                                   num_experts=self.fd_num_experts, num_domains=self.num_domains)
-            self.conv1_bn = nn.BatchNorm2d(channel)
-            self.conv1_act = nn.SiLU()
-        else:
-            self.conv1 = conv_nxn_bn(channel, channel, kernel_size)
+        self.conv1 = conv_nxn_bn(channel, channel, kernel_size)
         self.conv2 = conv_1x1_bn(channel, dim)
         self.transformer = Transformer(dim, depth, 1, 32, mlp_dim, dropout)
         self.conv3 = conv_1x1_bn(dim, channel)
         self.conv4 = conv_nxn_bn(2 * channel, channel, kernel_size)
-    def forward(self, x, domain_assignments=None, router_weights=None, bpda=False):
+    def forward(self, x):
         y = x.clone()
-        if self.use_fdconv_conv1:
-            x = self.conv1_fd(x, domain_assignments, router_weights=router_weights, bpda=bpda)[0]
-            x = self.conv1_bn(x); x = self.conv1_act(x)
-        else:
-            x = self.conv1(x)
+        x = self.conv1(x)
         x = self.conv2(x)
         _, _, h, w = x.shape
         x = rearrange(x, 'b d (h ph) (w pw) -> b (ph pw) (h w) d', ph=self.ph, pw=self.pw)
@@ -893,10 +828,8 @@ class MobileViTEncoder(nn.Module):
                  num_sources=6, num_domains=3, fd_num_experts=3,
                  expansion=3, kernel_size=3, patch_size=(2, 2),
                  fdconv_stage_indices=None, replace_mode='dw',
-                 enable_band_stats=False, dataset='CIFAR100', source_names=None,
-                 mvit_fdconv=False):
+                 enable_band_stats=False, dataset='CIFAR100', source_names=None):
         super().__init__()
-        self.mvit_fdconv = bool(mvit_fdconv)
         ih = iw = size
         assert ih % patch_size[0] == 0 and iw % patch_size[1] == 0
 
@@ -953,12 +886,7 @@ class MobileViTEncoder(nn.Module):
         def _use_fd_dw(idx):
             return (idx in self.fdconv_stage_indices) and (self.replace_mode == 'dw')
 
-        # ★ 224 输入(Imagenette/ImageNet) 适配(与主 main 一致): mv2[0] stride=2, 早期多一次下采样,
-        #   让进 mvit transformer 的特征图从 56×56 降到 28×28(attention 量级降 16 倍); 32输入(CIFAR)行为不变。
-        _imagenet_like = dataset in ('Imagenette', 'ImageNet', 'ImageNet-100', 'Restricted_ImageNet')
-        _mv2_0_stride = 2 if _imagenet_like else 1
-
-        self.mv2.append(MV2Block(channels[0], channels[1], _mv2_0_stride, expansion, use_fdconv_dw=_use_fd_dw(0),
+        self.mv2.append(MV2Block(channels[0], channels[1], 1, expansion, use_fdconv_dw=_use_fd_dw(0),
                                  num_domains=self.num_threat_domains, fd_num_experts=self.fd_num_experts))
         self.mv2.append(MV2Block(channels[1], channels[2], 1, expansion, use_fdconv_dw=_use_fd_dw(1),
                                  num_domains=self.num_threat_domains, fd_num_experts=self.fd_num_experts))
@@ -974,15 +902,12 @@ class MobileViTEncoder(nn.Module):
                                  num_domains=self.num_threat_domains, fd_num_experts=self.fd_num_experts))
 
         self.mvit = nn.ModuleList([])
-        _mv_kw = dict(use_fdconv_conv1=self.mvit_fdconv,
-                      num_domains=self.num_threat_domains, fd_num_experts=self.fd_num_experts)
-        self.mvit.append(MobileViTBlock(dims[0], L[0], channels[5], kernel_size, patch_size, int(dims[0] * 2), **_mv_kw))
-        self.mvit.append(MobileViTBlock(dims[1], L[1], channels[7], kernel_size, patch_size, int(dims[1] * 4), **_mv_kw))
-        self.mvit.append(MobileViTBlock(dims[2], L[2], channels[9], kernel_size, patch_size, int(dims[2] * 4), **_mv_kw))
+        self.mvit.append(MobileViTBlock(dims[0], L[0], channels[5], kernel_size, patch_size, int(dims[0] * 2)))
+        self.mvit.append(MobileViTBlock(dims[1], L[1], channels[7], kernel_size, patch_size, int(dims[1] * 4)))
+        self.mvit.append(MobileViTBlock(dims[2], L[2], channels[9], kernel_size, patch_size, int(dims[2] * 4)))
 
         self.conv2 = conv_1x1_bn(channels[-2], channels[-1])
-        # ★ 自适应池化(与主 main 一致): 32输入下等价 AvgPool2d(4,1); 224/Imagenette 下能把任意空间尺寸→1×1
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.pool = nn.AvgPool2d(ih // 8, 1)
         self.fc = nn.Linear(channels[-1], num_classes, bias=False)
 
         for m in self.modules():
@@ -1079,11 +1004,11 @@ class MobileViTEncoder(nn.Module):
         for i, blk in enumerate(self.mv2):
             x = blk(x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
             if i == 4:
-                x = self.mvit[0](x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+                x = self.mvit[0](x)
             if i == 5:
-                x = self.mvit[1](x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+                x = self.mvit[1](x)
             if i == 6:
-                x = self.mvit[2](x, domain_assignments, router_weights=router_weights, bpda=self.use_bpda)
+                x = self.mvit[2](x)
 
         x_feature = self.conv2(x)
         pooled = self.pool(x_feature).view(-1, x_feature.shape[1])

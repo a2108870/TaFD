@@ -1,195 +1,98 @@
-# TaFD: Threat-aware Frequency Decoupling for Heterogeneous Adversarial Robustness
+# TaFD
 
-This repository contains the official implementation of **TaFD**, a unified defense framework that addresses negative transfer in joint adversarial training (JAT) under heterogeneous threat models.
+Official release repository for TaFD, a threat-aware frequency-domain defense
+for heterogeneous adversarial training.
 
-TaFD reformulates JAT as a frequency-domain divide-and-conquer paradigm via a **Diagnosis–Dispatch** architecture:
-- **Diagnosis stage**: Discovers latent threat domains via unsupervised clustering of attack spectral prototypes, and trains a lightweight classifier for threat-domain identification.
-- **Dispatch stage**: Employs a novel Frequency-Conditional Convolution (FCConv) that learns threat-domain-specific spectral masks and performs sample-level hard routing to dedicated experts.
+This repository contains the TaFD method code used for the paper submission.
+Third-party baselines such as PUAT, FACE, TRADES, RAMP, MNG, DAT, and GBN are
+not included. The release focuses on reproducing TaFD and its method ablations.
 
----
+## Method Components
 
-## Requirements
+- Threat-domain diagnosis: learns spectral prototypes and assigns heterogeneous
+  attacks to threat domains.
+- Diagnosis-dispatch: routes each input through threat-dependent frequency
+  processing according to the diagnosed domain.
+- Frequency-domain experts: FC-Conv modules apply domain-conditioned frequency
+  transformations before classification.
+- Default setting: K=2 threat domains, matching the main TaFD configuration in
+  the paper.
 
-### Environment
+## Repository Layout
 
-- Python 3.8+
-- PyTorch ≥ 1.12 with CUDA support
+- train_tafd.py: paper-aligned training and evaluation entrypoint.
+- evaluate_adaptive_diagnosis.py: adaptive diagnosis-attack evaluation entrypoint.
+- ablation_no_threat_domain_diagnosis.py: ablation used for removing diagnosis.
+- ablation_direct_frequency_mask.py: direct-mask ablation entrypoint.
+- ablation_no_assignment_alignment.py: assignment-alignment ablation entrypoint.
+- ablation_standard_convolution.py: standard-convolution ablation entrypoint.
+- main_train_pgdtrain.py: original implementation retained for compatibility.
+- models/: TaFD backbones, threat-domain diagnosis, and FC-Conv implementation.
+- attacks/: heterogeneous attack implementations used by TaFD.
+- torchattacks/: vendored torchattacks source required by this code snapshot.
+- utils/: dataset and training utilities.
+- docs/: reproducibility and provenance notes.
 
-### Install Dependencies
+## Installation
 
-```bash
-pip install -r requirements.txt
-```
+Create a Python environment with PyTorch and install the remaining dependencies:
 
-Key dependencies: `torch`, `torchvision`, `numpy`, `matplotlib`, `tqdm`, `scikit-learn`, `scipy`, `kornia`, `einops`, `Pillow`
+    pip install -r requirements.txt
 
----
+The code expects CUDA for full training and evaluation. CPU import tests are
+supported, but paper-scale runs require a GPU.
 
-## Dataset Preparation
+## Dataset Layout
 
-### CIFAR-10 / CIFAR-100
+Place datasets under a user-controlled root and pass it through --dataset_path.
+No dataset files are included in this repository.
 
-These datasets are automatically downloaded by torchvision when running the training script for the first time. By default, they are saved to `./datasets/`.
+Expected layouts:
 
-The expected directory structure after download:
-```
-datasets/
-├── cifar-10-batches-py/      # auto-downloaded
-└── cifar100/                 # auto-downloaded
-```
+    datasets/
+      cifar100/
+      tiny-imagenet-200-32x32/
+      tiny-imagenet_10class_32/
+      imagenette2-320/
+        train/
+        val/
 
----
+Imagenette can also be named imagenette2, imagenette2-160, or imagenette.
 
-## Training
+## Training Examples
 
-The main training script is `train.py`. It supports CIFAR-10 and CIFAR-100, with ResNet-34 and MobileViT-XS backbones, under two attack configurations:
+CIFAR-100, ResNet, v10, K=2:
 
-- **V10**: 7 training attacks spanning $\ell_p$-bounded, color, and lightness threats
-- **V20**: 5 training attacks spanning $\ell_p$-bounded, color, spatial, and on-manifold threats
+    python train_tafd.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --batch_size 128 --test_batch_size 16 --end_epoch 76
 
-### Key Arguments
+Imagenette, ResNet, v10, K=2:
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--dataset` | `CIFAR100` | Dataset: `CIFAR10`, `CIFAR100` |
-| `--backbone` | `resnet` | Model backbone: `resnet` or `mobilevit` |
-| `--attack_config` | `v10` | Attack set: `v10` (7 attacks) or `v20` (5 attacks) |
-| `--domains` | `6` | Number of latent threat domains *K* |
-| `--lr` | `0.001` | Main network learning rate |
-| `--lr_domain` | `0.001` | Domain classifier learning rate |
-| `--batch_size` | `128` | Training batch size |
-| `--end_epoch` | `76` | Total training epochs |
-| `--eval_freq` | `15` | Evaluation frequency (epochs) |
-| `--gpu` | `0` | GPU device index |
-| `--seed` | `0` | Random seed |
-| `--result_dir` | *(auto)* | Output directory (auto-generated if not set) |
+    python train_tafd.py --dataset Imagenette --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --batch_size 12 --test_batch_size 16 --end_epoch 76
 
-### V10 Attack Configuration
-Training attacks: `Linf_PGD`, `L2_PGD`, `ACE`, `HSVAdv`, `ReColorAdv`, `ALA`, `RetouchUAA`
+Imagenette, MobileViT, v20, K=2:
 
-Evaluation attacks: above + `Clean`
-
-### V20 Attack Configuration
-Training attacks: `Linf_PGD`, `L2_PGD`, `ACE`, `GPGD`, `StAdv`
-
-Evaluation attacks: above + `Clean`
-
----
-
-### Example Commands
-
-**CIFAR-10, ResNet-34, V10 attacks:**
-```bash
-python train.py \
-    --dataset CIFAR10 \
-    --backbone resnet \
-    --attack_config v10 \
-    --domains 6 \
-    --gpu 0
-```
-
-**CIFAR-100, ResNet-34, V10 attacks:**
-```bash
-python train.py \
-    --dataset CIFAR100 \
-    --backbone resnet \
-    --attack_config v10 \
-    --domains 6 \
-    --gpu 0
-```
-
-**CIFAR-100, MobileViT-XS, V10 attacks:**
-```bash
-python train.py \
-    --dataset CIFAR100 \
-    --backbone mobilevit \
-    --attack_config v10 \
-    --domains 6 \
-    --gpu 0
-```
-
-**CIFAR-100, ResNet-34, V20 attacks:**
-```bash
-python train.py \
-    --dataset CIFAR100 \
-    --backbone resnet \
-    --attack_config v20 \
-    --domains 5 \
-    --gpu 0
-```
-
-### Resuming Training
-
-```bash
-python train.py \
-    --dataset CIFAR100 \
-    --backbone resnet \
-    --attack_config v10 \
-    --resume ./results/<result_dir>/latest_model.pth \
-    --gpu 0
-```
-
----
+    python train_tafd.py --dataset Imagenette --dataset_path ./datasets --backbone mobilevit --attack_config v20 --domains 2 --batch_size 12 --test_batch_size 16 --end_epoch 76
 
 ## Evaluation
 
-Use `eval.py` to evaluate a trained checkpoint on the full test set with APGD (100 steps):
+Resume from a checkpoint by passing --resume:
 
-```bash
-python eval.py \
-    --checkpoint ./results/<result_dir>/latest_model.pth \
-    --dataset CIFAR100 \
-    --backbone resnet \
-    --attack_config v10 \
-    --gpu 0
-```
+    python train_tafd.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --resume ./checkpoints/latest_model.pth --start_epoch 75 --end_epoch 76
 
----
+Adaptive diagnosis evaluation:
 
-## Output Structure
+    python evaluate_adaptive_diagnosis.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --resume ./checkpoints/latest_model.pth
 
-Training results are saved to `./results/<auto-generated-name>/`, which includes:
-- `latest_model.pth` — latest model checkpoint (overwritten each epoch)
-- `accuracy_curves/` — accuracy curve plots (PNG)
+## Reproducibility Notes
 
-The result directory name is auto-generated based on hyperparameters, e.g.:
-```
-results/tafd_resnet_CIFAR100_d6_v10_lr0.001_dlr0.001_dw1.0_bs128_ep76_seed0/
-```
-
----
-
-## Project Structure
-
-```
-TaFD/
-├── train.py                    # Main training script
-├── eval.py                     # Standalone evaluation script
-├── models/
-│   ├── encoder.py              # TaFD encoder (ResNet / MobileViT + FCConv + Diagnosis)
-│   ├── fdconv.py               # Frequency-Conditional Convolution (FCConv)
-│   └── standard_models.py      # Baseline backbone definitions (no FCConv)
-├── attacks/
-│   ├── __init__.py             # Attack registry
-│   ├── ace.py                  # ACE color attack
-│   ├── hsvadv.py               # HSVAdv attack
-│   ├── ala.py                  # ALA (Adversarial Lightness Attack)
-│   ├── recoloradv.py           # ReColorAdv attack
-│   ├── stadv.py                # StAdv spatial flow attack
-│   ├── gpgd.py                 # GPGD on-manifold attack
-│   └── retouch_uaa.py          # RetouchUAA attack
-├── utils/
-│   ├── datasets_utils.py       # Data loaders for CIFAR-10/100
-│   └── utils.py                # Loss functions, meters, accuracy
-├── recoloradv/                 # ReColorAdv color space utilities (third-party)
-├── torchattacks/               # APGD, PGD attack implementations (third-party)
-├── requirements.txt
-├── LICENSE
-└── README.md
-```
-
----
+- Generated outputs are written to results/ by default and are ignored by git.
+- Checkpoints, logs, datasets, and local server scripts are intentionally
+  excluded.
+- The compatibility scripts keep the original experiment behavior. The clean
+  wrapper names are provided so that commands match the paper terminology.
+- For ablation results, use the ablation_* entrypoints instead of unrelated
+  baseline code.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+This project is released under the MIT License. See LICENSE for details.

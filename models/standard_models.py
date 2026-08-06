@@ -2,10 +2,11 @@
 """
 models/standard_models.py
 -------------------------
-Standard ResNet-34 and MobileViT baseline models (no FCConv / routing / BPDA).
-Input normalization is consistent with encoder.py.
+标准 ResNet-34 和 MobileViT baseline 模型。
+不含 FDConv / 域路由 / BPDA，仅做标准分类。
+输入标准化逻辑与 encoder.py 保持一致。
 
-Usage:
+使用方法：
   from models.standard_models import create_standard_model
   model = create_standard_model(backbone='resnet', dataset='CIFAR100', num_classes=100)
 """
@@ -21,10 +22,12 @@ except ImportError:
     EINOPS_AVAILABLE = False
     rearrange = None
 
-# Dataset normalization statistics (consistent with encoder.py)
+# ── 数据集标准化参数（与 encoder.py 一致）──
 DATASET_STATS = {
-    'CIFAR10':  {'mean': [0.4914, 0.4822, 0.4465], 'std': [0.2023, 0.1994, 0.2010]},
-    'CIFAR100': {'mean': [0.4914, 0.4822, 0.4465], 'std': [0.2023, 0.1994, 0.2010]},
+    'CIFAR10':       {'mean': [0.4914, 0.4822, 0.4465], 'std': [0.2023, 0.1994, 0.2010]},
+    'CIFAR100':      {'mean': [0.4914, 0.4822, 0.4465], 'std': [0.2023, 0.1994, 0.2010]},
+    'TinyImageNet':  {'mean': [0.485, 0.456, 0.406],    'std': [0.229, 0.224, 0.225]},
+    'ImageNet':      {'mean': [0.485, 0.456, 0.406],    'std': [0.229, 0.224, 0.225]},
 }
 
 
@@ -43,7 +46,9 @@ def _get_normalize(dataset):
     return InputNormalize(mean=stats['mean'], std=stats['std'])
 
 
-# Standard ResNet-34
+# ══════════════════════════════════════════════════════════════════════════
+#  标准 ResNet-34
+# ══════════════════════════════════════════════════════════════════════════
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -66,7 +71,7 @@ class BasicBlock(nn.Module):
 
 
 class StandardResNet34(nn.Module):
-    """Standard ResNet-34, structurally aligned with TaFD ResNetEncoder (without FCConv/routing)."""
+    """标准 ResNet-34，结构与 TaFD ResNetEncoder 对齐（去掉 FDConv/域路由）。"""
 
     def __init__(self, num_classes=100, dataset='CIFAR100'):
         super().__init__()
@@ -121,20 +126,22 @@ class StandardResNet34(nn.Module):
         x = self.layer4(x)
         x = self.avgpool(x).view(x.size(0), -1)
         logits = self.fc(x)
-        # Return tuple for compatibility with torchattacks model(x)[0] calls
+        # 返回 tuple 以兼容 torchattacks 和 attacks/* 中的 model(x)[0] 调用
         return (logits,)
 
 
-# Standard MobileViT
+# ══════════════════════════════════════════════════════════════════════════
+#  标准 MobileViT
+# ══════════════════════════════════════════════════════════════════════════
 def _conv_1x1_bn(inp, oup):
     return nn.Sequential(
         nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
         nn.BatchNorm2d(oup), nn.SiLU(),
     )
 
-def _conv_nxn_bn(inp, oup, kernel_size=3, stride=1):
+def _conv_nxn_bn(inp, oup, kernal_size=3, stride=1):
     return nn.Sequential(
-        nn.Conv2d(inp, oup, kernel_size, stride, 1, bias=False),
+        nn.Conv2d(inp, oup, kernal_size, stride, 1, bias=False),
         nn.BatchNorm2d(oup), nn.SiLU(),
     )
 
@@ -228,7 +235,7 @@ class _MobileViTBlock(nn.Module):
 
 
 class StandardMobileViT(nn.Module):
-    """Standard MobileViT, structurally aligned with TaFD MobileViTEncoder (without FCConv/routing)."""
+    """标准 MobileViT，结构与 TaFD MobileViTEncoder 对齐（去掉 FDConv/域路由）。"""
 
     def __init__(self, num_classes=100, dataset='CIFAR100',
                  size=32, expansion=3, kernel_size=3, patch_size=(2, 2)):
@@ -288,7 +295,9 @@ class StandardMobileViT(nn.Module):
         return (logits,)
 
 
-# Factory function
+# ══════════════════════════════════════════════════════════════════════════
+#  工厂函数
+# ══════════════════════════════════════════════════════════════════════════
 def create_standard_model(backbone='resnet', dataset='CIFAR100', num_classes=100):
     if backbone == 'resnet':
         return StandardResNet34(num_classes=num_classes, dataset=dataset)

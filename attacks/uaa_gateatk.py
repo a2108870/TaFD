@@ -1,10 +1,12 @@
-import torch
-import kornia
 import math
+
+import kornia
+import torch
+
+from attacks.gateatk_utils import balanced_gate_weight, gate_margin_loss_minimize, unpack_model_outputs
 
 
 def srgb_to_linear(x):
-    """sRGB gamma decompression (inverse gamma): sRGB -> linear RGB. Vectorized over batch."""
     mask_below = (x <= 0.04045).to(x)
     mask_above = (x > 0.04045).to(x)
     x_clamped = torch.clamp(x, min=1e-16)
@@ -12,21 +14,10 @@ def srgb_to_linear(x):
 
 
 def linear_to_srgb(x):
-    """sRGB gamma compression: linear RGB -> sRGB. Vectorized over batch."""
     mask_below = (x <= 0.0031308).to(x)
     mask_above = (x > 0.0031308).to(x)
     x_clamped = torch.clamp(x, min=1e-16)
     return x_clamped * 12.92 * mask_below + (1.055 * torch.pow(x_clamped, 1 / 2.4) - 0.055) * mask_above
-
-
-# Filters used in the processing pipeline (CF handles color curves separately)
-all_filters = ['ExposureFilter', 'GammaFilter', 'SaturationFilter', 'WBFilter',
-               'ContrastFilter', 'HueFilter']
-
-
-def ExposureFilter(image, param):
-    image_t = image * (2 ** param)
-    return image_t
 
 
 def GammaFilter(image, param):
@@ -61,8 +52,9 @@ def HueFilter(image, param):
 
 
 def ContrastFilter(image, param):
+    torch.pi = math.pi
     contrast = param
-    contrast_image = -torch.cos(torch.tensor(math.pi, device=image.device, dtype=image.dtype) * image) * 0.5 + 0.5
+    contrast_image = -torch.cos(torch.pi * image) * 0.5 + 0.5
     contrast = contrast.view(-1, 1, 1, 1)
     t_image = torch.lerp(image, contrast_image, contrast)
     return t_image
@@ -71,25 +63,19 @@ def ContrastFilter(image, param):
 def CF(img, param, steps):
     batch_size, channels = param.shape[0], param.shape[1]
     param_5d = param.reshape(batch_size, channels, 1, 1, -1)
-
     if param_5d.shape[-1] < steps:
         raise ValueError(f"Parameter dimension too small: {param_5d.shape[-1]} < {steps}")
-
     color_curve_sum = torch.sum(param_5d, dim=4) + 1e-30
-
-    # Vectorized: compute all steps at once
     step_offsets = torch.arange(steps, device=img.device, dtype=img.dtype).view(1, 1, 1, 1, -1) / steps
-    img_expanded = img.unsqueeze(-1)  # [B, C, H, W, 1]
-    clip_values = torch.clamp(img_expanded - step_offsets, 0, 1.0 / steps)  # [B, C, H, W, steps]
-    total_image = (clip_values * param_5d).sum(dim=-1)  # [B, C, H, W]
-
+    img_expanded = img.unsqueeze(-1)
+    clip_values = torch.clamp(img_expanded - step_offsets, 0, 1.0 / steps)
+    total_image = (clip_values * param_5d).sum(dim=-1)
     total_image *= steps / color_curve_sum
     return total_image
 
 
 def sharpness(img, param):
-    img_t = kornia.enhance.sharpness(img, param)
-    return img_t
+    return kornia.enhance.sharpness(img, param)
 
 
 def processing_image(image_batch_ori, param, hist_param, hist_bin, device):
@@ -103,15 +89,12 @@ def processing_image(image_batch_ori, param, hist_param, hist_bin, device):
     return image_batch
 
 
-def retouch_uaa_atk(input, y, model, device, lr=0.01, max_iterations=10, steps=64, bound=16, ncls=10,
-                    norm_mean=None, norm_std=None):
-    """
-    RetouchUAA attack function.
-    Note: Model handles normalization internally, so input should be in [0,1] pixel domain.
-    norm_mean and norm_std parameters are kept for API compatibility but not used.
-    """
+def UAA_atk(input, y, true_gate, model, device, lr=0.1, max_iterations=10, steps=64, bound=16, ncls=10,
+            gate_loss_scale=1.0, norm_mean=None, norm_std=None):
     batch_size = input.shape[0]
-    X, labels = input.to(device), y.to(device)
+    X = input.to(device)
+    labels = y.to(device)
+    true_gate = true_gate.to(device)
     labels_onehot = torch.zeros(labels.size(0), ncls, device=device)
     labels_onehot.scatter_(1, labels.unsqueeze(1), 1)
     labels_infhot = torch.zeros_like(labels_onehot).scatter_(1, labels.unsqueeze(1), float('inf'))
@@ -126,16 +109,23 @@ def retouch_uaa_atk(input, y, model, device, lr=0.01, max_iterations=10, steps=6
     optimizer_eta = torch.optim.Adam([{'params': eta, 'lr': lr, 'betas': (0.9, 0.999)}])
     optimizer_hist_param = torch.optim.Adam([{'params': hist_param, 'lr': lr, 'betas': (0.9, 0.999)}])
 
-    for i in range(max_iterations):
+    for _ in range(max_iterations):
         X_linear_use = X_pgd_linear.clone().detach()
         X_linear_use = processing_image(X_linear_use, eta, hist_param, hist_bin, device)
         X_srgb_eta = linear_to_srgb(X_linear_use)
-        # Forward pass (model handles normalization internally)
-        output = model(X_srgb_eta)[0]
+        outputs = model(X_srgb_eta)
+        logits, gate_logits = unpack_model_outputs(outputs)
 
-        real = output.gather(1, labels.unsqueeze(1)).squeeze(1)
-        other = (output - labels_infhot).max(1)[0]
-        loss = torch.clamp(real - other, min=0).sum()
+        real = logits.gather(1, labels.unsqueeze(1)).squeeze(1)
+        other = (logits - labels_infhot).max(1)[0]
+        loss_cls = torch.clamp(real - other, min=0).sum()
+
+        if gate_logits is not None:
+            loss_gate = gate_margin_loss_minimize(gate_logits, true_gate, reduction='sum')
+            weight = balanced_gate_weight(loss_cls, loss_gate, gate_loss_scale)
+            loss = loss_cls + weight * loss_gate
+        else:
+            loss = loss_cls
 
         loss.backward()
 
@@ -159,14 +149,12 @@ def retouch_uaa_atk(input, y, model, device, lr=0.01, max_iterations=10, steps=6
         eta.data[:, 6] = torch.clamp(eta.data[:, 6], min=1)
 
         hist_param.data = torch.clamp(hist_param.data, min=1 / steps, max=bound / steps)
-
         if hist_param.shape[1] != 3 or hist_param.shape[2] != hist_bin:
             hist_param.data = hist_param.data.reshape(batch_size, 3, hist_bin)
 
         with torch.no_grad():
-            predicted_classes = output.argmax(1)
-            is_adv = (predicted_classes != labels)
-
+            predicted_classes = logits.argmax(1)
+            is_adv = predicted_classes != labels
             if is_adv.any():
                 best_adversary[is_adv] = X_srgb_eta[is_adv]
 

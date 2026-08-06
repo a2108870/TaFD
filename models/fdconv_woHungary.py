@@ -9,7 +9,9 @@ FDConv (drop-in) with:
 - Hard routing: num_domains == num_experts, compute K paths,
   then select by sample domain index (no weighted fusion)
 
-Usage: from models.fdconv import FDConv
+Usage: from models.fdconv_woHungary import FCConv
+
+This is an isolated copy used by the `woHungary` ablation entrypoints.
 """
 
 import math

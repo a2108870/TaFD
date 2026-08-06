@@ -1,6 +1,8 @@
 import os
+import numpy as np
 
 import torch
+import torch.nn as nn
 
 class CustomLossFunction:
     def __init__(self, reduction='mean'):

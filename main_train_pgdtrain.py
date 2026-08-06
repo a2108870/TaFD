@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-train.py
---------
-TaFD: Threat-aware Frequency Decoupling for Heterogeneous Adversarial Robustness.
+main_woorth_firstblock_FDConv10_mix_randT.py
+--------------------------------------------
+基于 main_woorth_firstblock_FDConv10_mix.py 的改进版本。
 
-Usage:
-  python train.py --dataset CIFAR100 --backbone resnet --attack_config v10 --gpu 0
+核心改动：
+  - 验证时：使用当前评估配置
+  - SPSA 仅在 epoch=50 和 75 时评估
+
+使用方法：
+  python main_woorth_firstblock_FDConv10_mix_randT.py --dataset CIFAR100
 """
 
 import os
@@ -21,81 +25,82 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from torchvision import transforms
+# 修正：在导入 pyplot 之前，强制使用 'Agg' 后端（避免多进程与 tkinter 冲突）
+import matplotlib
+
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# ─── Third-party / Custom libraries ─────────────────────────────────────────────────────
+# ─── 第三方 / 自定义库 ─────────────────────────────────────────────────────
 from utils.utils import *
 from utils.datasets_utils import GetDataLoader
-from torchattacks import APGD, PGD, PGDL2
+from torchattacks import APGD, PGD, PGDL2, SPSA
 
-# V10 Attacks
+# V10 攻击
 from attacks.ace import ACE
 from attacks.recoloradv import ReColorAdv
-from attacks.ala import ala_atk
-from attacks.hsvadv import hsvadv_atk
-from attacks.retouch_uaa import retouch_uaa_atk
+from attacks.light import light_atk
+from attacks.hue import hue_atk
+from attacks.uaa import UAA_atk
 
-# V20 Attacks
-from attacks.gpgd import gpgd_atk, build_pca_bases, save_pca_bases, load_pca_bases
+# V20 攻击
+from attacks.subspace import subspace_atk, build_pca_bases, save_pca_bases, load_pca_bases
 from attacks.stadv import stadv_attack
 
-# Models
+# 整合模型
 from models.encoder import create_encoder
 
 # -------------------------------------------------------------------------
-# Global device (overridden by --gpu in main)
+# 全局设备（由 --gpu 参数在 main 入口处覆盖）
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # -------------------------------------------------------------------------
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Attack configuration registry
+#  攻击配置注册表
 # ══════════════════════════════════════════════════════════════════════════
 ATTACK_CONFIGS = {
     'v10': {
-        # train_attacks: standard PGD-10 used during adversarial training
-        'train_attacks': ['Linf_PGD', 'L2_PGD', 'ACE', 'HSVAdv', 'ReColorAdv', 'ALA', 'RetouchUAA'],
-        # test_attacks: Auto-PGD (APGD-100) used during evaluation — stronger than training PGD
-        'test_attacks': ['Clean', 'Linf_APGD', 'L2_APGD', 'ACE', 'ReColorAdv', 'HSVAdv', 'ALA', 'RetouchUAA'],
+        'train_attacks': ['APGD_Linf', 'APGD_L2', 'ACE', 'Hue', 'ReColorAdv', 'Light', 'UAA'],
+        'test_attacks': ['Clean', 'APGD_Linf', 'APGD_L2', 'ACE', 'ReColorAdv', 'Hue', 'Light', 'UAA', 'SPSA'],
         'num_sources': 7,
-        'domain_names': ['Linf_PGD', 'L2_PGD', 'ACE', 'HSVAdv', 'ReColorAdv', 'ALA', 'RetouchUAA'],
+        'domain_names': ['APGD_Linf', 'APGD_L2', 'ACE', 'Hue', 'ReColorAdv', 'Light', 'UAA'],
     },
     'v20': {
-        'train_attacks': ['Linf_PGD', 'L2_PGD', 'ACE', 'GPGD', 'StAdv'],
-        'test_attacks': ['Clean', 'Linf_APGD', 'L2_APGD', 'ACE', 'GPGD', 'StAdv'],
+        'train_attacks': ['APGD_Linf', 'APGD_L2', 'ACE', 'SUB', 'STADV'],
+        'test_attacks': ['Clean', 'APGD_Linf', 'APGD_L2', 'ACE', 'SUB', 'STADV', 'SPSA'],
         'num_sources': 5,
-        'domain_names': ['Linf_PGD', 'L2_PGD', 'ACE', 'GPGD', 'StAdv'],
+        'domain_names': ['APGD_Linf', 'APGD_L2', 'ACE', 'SUB', 'STADV'],
     }
 }
 
-# Available attacks registry (V10 and V20 merged)
-# Training-phase attacks (standard PGD-10)
-ALL_TRAIN_ATTACKS = ['Linf_PGD', 'L2_PGD', 'ACE', 'ReColorAdv', 'HSVAdv', 'ALA', 'RetouchUAA', 'GPGD', 'StAdv']
-# Evaluation-phase attacks (APGD-100 for Linf/L2, same impl for others)
-ALL_ATTACKS = ['Clean', 'Linf_PGD', 'L2_PGD', 'Linf_APGD', 'L2_APGD',
-               'ACE', 'ReColorAdv', 'HSVAdv', 'ALA', 'RetouchUAA', 'GPGD', 'StAdv']
-DOMAIN_ATTACKS = ['Linf_PGD', 'L2_PGD', 'Linf_APGD', 'L2_APGD',
-                  'ACE', 'ReColorAdv', 'HSVAdv', 'ALA', 'RetouchUAA', 'GPGD', 'StAdv']
+# 可用攻击注册表（合并 V10 和 V20）
+ALL_ATTACKS = ['Clean', 'APGD_Linf', 'APGD_L2', 'SPSA', 'ACE', 'ReColorAdv', 'Hue', 'Light', 'UAA', 'SUB', 'STADV']
+DOMAIN_ATTACKS = ['APGD_Linf', 'APGD_L2', 'ACE', 'ReColorAdv', 'Hue', 'Light', 'UAA', 'SUB', 'STADV']
 DOMAIN_SUPERVISED_ATTACKS = list(DOMAIN_ATTACKS)
 
+# ══════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════
+SPSA_EVAL_EPOCHS = {}
 
 ATTACK_SHORT_NAMES = {
-    # Training PGD (standard PGD-10)
-    'Linf_PGD':  'PGD_L',
-    'L2_PGD':    'PGD_2',
-    # Evaluation APGD (Auto-PGD-100)
-    'Linf_APGD': 'AP_L',
-    'L2_APGD':   'AP_2',
+    'APGD_Linf': 'AP_L',
+    'APGD_L2': 'AP_2',
     'ACE': 'ACE',
-    'HSVAdv': 'HSVAdv',
+    'Hue': 'Hue',
     'ReColorAdv': 'ReC',
-    'ALA': 'ALA',
-    'RetouchUAA': 'RetouchUAA',
-    'GPGD': 'GPGD',
-    'StAdv': 'StA',
+    'Light': 'Lig',
+    'UAA': 'UAA',
+    'SUB': 'SUB',
+    'STADV': 'STA',
+    'SPSA': 'SPSA',
     'Clean': 'Clean',
 }
 
 
+def _cuda_sync_if_needed():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 def _update_confusion_matrix(cm: torch.Tensor, true_domain: torch.Tensor, pred_domain: torch.Tensor):
@@ -110,10 +115,10 @@ def _update_confusion_matrix(cm: torch.Tensor, true_domain: torch.Tensor, pred_d
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Utility functions: learning rate, meters, accuracy, normalization
+#  工具函数：学习率、计量器、准确率、图像归一化
 # ══════════════════════════════════════════════════════════════════════════
 def set_group_lrs(optimizer: optim.Optimizer, lr_main: float, lr_domain: float):
-    """Set learning rates for different param_groups (requires 'name': 'main' / 'domain')."""
+    """为不同 param_group 设置学习率（组需含 'name': 'main' / 'domain'）。"""
     for pg in optimizer.param_groups:
         if pg.get("name") == "domain":
             pg["lr"] = lr_domain
@@ -124,7 +129,7 @@ def set_group_lrs(optimizer: optim.Optimizer, lr_main: float, lr_domain: float):
 
 
 def adjust_learning_rate(optimizer, epoch, lr_main_init=0.001, lr_domain_init=0.003):
-    """Decay both groups according to the same schedule to maintain their ratio."""
+    """两组一起按相同 schedule 衰减，保持比例不变。"""
     if epoch < 50:
         factor = 1.0
     elif epoch < 70:
@@ -139,7 +144,7 @@ def adjust_learning_rate(optimizer, epoch, lr_main_init=0.001, lr_domain_init=0.
 
 
 def get_current_lrs(optimizer):
-    """Return {'main': lr, 'domain': lr}; sequentially named if unnamed."""
+    """返回 {'main': lr, 'domain': lr}；若未命名则按顺序命名。"""
     lrs = {}
     for i, pg in enumerate(optimizer.param_groups):
         name = pg.get("name", f"group{i}")
@@ -159,10 +164,10 @@ class AverageMeter:
 
     def update(self, val, n=1):
         self.val = val
-        # If Tensor, accumulate on GPU to avoid sync overhead
+        # 如果是 Tensor，保持在 GPU 上累加，避免同步
         if isinstance(val, torch.Tensor):
             val = val.detach()
-            # Ensure scalar tensor
+            # 确保是标量 tensor
             if val.numel() == 1:
                 val = val.squeeze()
             if not isinstance(self.sum, torch.Tensor):
@@ -176,7 +181,7 @@ class AverageMeter:
     def avg(self):
         if self.count == 0: return 0
         ret = self.sum / self.count
-        # Sync to CPU only when displaying
+        # 仅在需要显示时才同步回 CPU
         if isinstance(ret, torch.Tensor):
             return ret.item()
         return ret
@@ -195,9 +200,17 @@ def accuracy(output, target, topk=(1,)):
     return res
 
 
+# === 动态类平衡权重（保留实现，按需启用）===
+def compute_balanced_ce_weight(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
+    counts = torch.bincount(labels, minlength=num_classes).float().to(labels.device)
+    counts = torch.clamp(counts, min=1.0)
+    inv = 1.0 / counts
+    weights = inv / inv.mean()  # 平均权重=1
+    return weights
+
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Plotting: Accuracy curves
+#  绘图：准确率曲线
 # ══════════════════════════════════════════════════════════════════════════
 def plot_accuracy_curves(accuracies_dict, epoch, save_dir, title_prefix="acc"):
     if not accuracies_dict: return
@@ -235,18 +248,17 @@ def plot_accuracy_curves(accuracies_dict, epoch, save_dir, title_prefix="acc"):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Adversarial sample generation
+#  对抗样本生成（含：Tiny 时 lr ×0.1；且 ncls 随数据集传入）
 # ══════════════════════════════════════════════════════════════════════════
 def generate_single_attack(attack_func, img, tgt, model, device,
                            attack_name="Unknown", **kwargs):
     try:
-        # PGD/APGD are torchattacks objects: call as attack_func(img, tgt)
-        if attack_name in ('Linf_PGD', 'L2_PGD', 'Linf_APGD', 'L2_APGD'):
+        if attack_name in ('APGD_Linf', 'APGD_L2', 'SPSA'):
             return attack_func(img, tgt)
         else:
             return attack_func(img, tgt, model, device, **kwargs)
     except Exception as e:
-        print(f"Attack failed {attack_name}: {e}")
+        print(f"攻击失败 {attack_name}: {e}")
         return img.clone()
 
 
@@ -278,44 +290,37 @@ def _build_train_pgd_attack(model: nn.Module, norm: str, eps: float, steps: int)
 
 
 def generate_attack_batch(img, tgt, model, device, attack_names,
-                          atk_apgd_linf=None, atk_apgd_l2=None,
+                          atk_apgd_linf=None, atk_apgd_l2=None, atk_spsa=None,
                           lr_scale=1.0, ncls=100, subspace_bases=None):
     """
-    Generate a dictionary of adversarial examples {attack_name: adv_x}.
-    Supports unified calling for both V10 and V20.
+    根据 attack_names 生成对抗样本字典 {attack_name: adv_x}。
+    支持 V10 与 V20 统一调用。
     """
     attack_inputs = {}
 
     for name in attack_names:
         if name == 'Clean':
             attack_inputs['Clean'] = img
-        elif name == 'Linf_PGD':
-            # Training: standard PGD-10 (atk_pgd_linf)
+        elif name == 'APGD_Linf':
             if atk_apgd_linf is None:
-                raise ValueError("Linf_PGD attack object not initialized")
-            attack_inputs['Linf_PGD'] = generate_single_attack(atk_apgd_linf, img, tgt, model, device, "Linf_PGD")
-        elif name == 'L2_PGD':
+                raise ValueError("APGD_Linf 攻击对象未初始化")
+            attack_inputs['APGD_Linf'] = generate_single_attack(atk_apgd_linf, img, tgt, model, device, "APGD_Linf")
+        elif name == 'APGD_L2':
             if atk_apgd_l2 is None:
-                raise ValueError("L2_PGD attack object not initialized")
-            attack_inputs['L2_PGD'] = generate_single_attack(atk_apgd_l2, img, tgt, model, device, "L2_PGD")
-        elif name == 'Linf_APGD':
-            # Evaluation: Auto-PGD-100 (atk_apgd_linf)
-            if atk_apgd_linf is None:
-                raise ValueError("Linf_APGD attack object not initialized")
-            attack_inputs['Linf_APGD'] = generate_single_attack(atk_apgd_linf, img, tgt, model, device, "Linf_APGD")
-        elif name == 'L2_APGD':
-            if atk_apgd_l2 is None:
-                raise ValueError("L2_APGD attack object not initialized")
-            attack_inputs['L2_APGD'] = generate_single_attack(atk_apgd_l2, img, tgt, model, device, "L2_APGD")
-
+                raise ValueError("APGD_L2 攻击对象未初始化")
+            attack_inputs['APGD_L2'] = generate_single_attack(atk_apgd_l2, img, tgt, model, device, "APGD_L2")
+        elif name == 'SPSA':
+            if atk_spsa is None:
+                raise ValueError("SPSA 攻击对象未初始化")
+            attack_inputs['SPSA'] = generate_single_attack(atk_spsa, img, tgt, model, device, "SPSA")
         elif name == 'ACE':
             attack_inputs['ACE'] = generate_single_attack(
                 ACE, img, tgt, model, device, "ACE",
                 lr=1 * lr_scale, max_iterations=10, ncls=ncls
             )
-        elif name == 'HSVAdv':
-            attack_inputs['HSVAdv'] = generate_single_attack(
-                hsvadv_atk, img, tgt, model, device, "HSVAdv",
+        elif name == 'Hue':
+            attack_inputs['Hue'] = generate_single_attack(
+                hue_atk, img, tgt, model, device, "Hue",
                 lr=1 * lr_scale, max_iterations=10, ncls=ncls
             )
         elif name == 'ReColorAdv':
@@ -323,54 +328,93 @@ def generate_attack_batch(img, tgt, model, device, attack_names,
                 ReColorAdv, img, tgt, model, device, "ReColorAdv",
                 lr=0.01 * lr_scale, max_iterations=10, ncls=ncls
             )
-        elif name == 'ALA':
-            attack_inputs['ALA'] = generate_single_attack(
-                ala_atk, img, tgt, model, device, "ALA",
+        elif name == 'Light':
+            attack_inputs['Light'] = generate_single_attack(
+                light_atk, img, tgt, model, device, "Light",
                 lr=1 * lr_scale, max_iterations=10, ncls=ncls
             )
-        elif name == 'RetouchUAA':
-            attack_inputs['RetouchUAA'] = generate_single_attack(
-                retouch_uaa_atk, img, tgt, model, device, "RetouchUAA",
+        elif name == 'UAA':
+            attack_inputs['UAA'] = generate_single_attack(
+                UAA_atk, img, tgt, model, device, "UAA",
                 lr=0.1 * lr_scale, max_iterations=10, ncls=ncls
             )
-        elif name == 'GPGD':
+        elif name == 'SUB':
             if subspace_bases is None:
-                raise ValueError("GPGD attack requires PCA bases, please build or load first")
-            attack_inputs['GPGD'] = generate_single_attack(
-                gpgd_atk, img, tgt, model, device, "GPGD",
+                raise ValueError("SUB 攻击需要 PCA bases，请先构建或加载")
+            attack_inputs['SUB'] = generate_single_attack(
+                subspace_atk, img, tgt, model, device, "SUB",
                 bases_dict=subspace_bases, steps=10, epsilon=2.0, ncls=ncls, proj='l2'
             )
-        elif name == 'StAdv':
-            attack_inputs['StAdv'] = generate_single_attack(
-                stadv_attack, img, tgt, model, device, "StAdv",
+        elif name == 'STADV':
+            attack_inputs['STADV'] = generate_single_attack(
+                stadv_attack, img, tgt, model, device, "STADV",
                 eps=0.045, steps=10, mode='linf'
             )
         else:
-            print(f"[WARN] Unsupported attack: {name}, skipped")
+            print(f"[WARN] 未支持的攻击: {name}，已跳过")
 
     return attack_inputs
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Helpers: String parsing & tqdm mapping format
+#  辅助：字符串解析 + tqdm 映射展示函数
 # ══════════════════════════════════════════════════════════════════════════
+def _is_tiny_dataset(dataset_name: str) -> bool:
+    return (dataset_name is not None) and ('tiny' in str(dataset_name).lower())
 
 
-def _infer_num_classes(dataset_name: str, fallback: int = 10) -> int:
-    """Infer number of classes from dataset name."""
+def _is_imagenette_dataset(dataset_name: str) -> bool:
+    return (dataset_name is not None) and ('imagenette' in str(dataset_name).lower())
+
+
+def _infer_input_size(dataset_name: str, fallback: int = 32) -> int:
     if dataset_name is None:
         return fallback
     name = str(dataset_name).lower()
+    if 'imagenette' in name:
+        return 224
+    if name == 'tiny':
+        return 64
+    return 32
+
+
+def _infer_num_classes(dataset_name: str, fallback: int = 10) -> int:
+    """
+    [修改] 修正逻辑，确保 10class 优先匹配
+    规则：
+    - 含 '200class' → 200
+    - 含 '100' → 100
+    - 含 '10class' → 10 (Tiny_32_10class)
+    - 含 'cifar10' → 10
+    - 含 'tiny' (且未命中 10class) → 200 (Default Tiny ImageNet)
+    - 否则用 fallback
+    """
+    if dataset_name is None:
+        return fallback
+    name = str(dataset_name).lower()
+
+    if '200class' in name:
+        return 200
+    if 'imagenette' in name:
+        return 10
     if ('cifar100' in name) or ('cifar-100' in name):
         return 100
+    # [关键修复] 优先匹配 10class，防止被 tiny 抢占
+    if '10class' in name:
+        return 10
     if ('cifar10' in name) or ('cifar-10' in name):
         return 10
+
+    # Tiny ImageNet 默认是 200 类
+    if 'tiny' in name:
+        return 200
+
     return fallback
 
 
 def mapping_status_str(status_dict: dict, order=None) -> str:
     if order is None:
-        order = ['Linf_PGD', 'L2_PGD', 'ACE', 'HSVAdv', 'ReColorAdv', 'ALA', 'RetouchUAA']
+        order = ['APGD_Linf', 'APGD_L2', 'ACE', 'Hue', 'ReColorAdv', 'Light', 'UAA']
     parts = []
     for k in order:
         short_k = ATTACK_SHORT_NAMES.get(k, k)
@@ -385,8 +429,8 @@ def mapping_status_str(status_dict: dict, order=None) -> str:
 
 
 def prepare_subspace_bases(args, trainloader):
-    """Build/load PCA bases for GPGD attack as needed."""
-    need_sub = ('GPGD' in getattr(args, 'train_attacks', [])) or ('GPGD' in getattr(args, 'attacks', []))
+    """按需构建/加载 SUB 攻击所需的 PCA bases。"""
+    need_sub = ('SUB' in getattr(args, 'train_attacks', [])) or ('SUB' in getattr(args, 'attacks', []))
     if not need_sub:
         args.subspace_bases = None
         return
@@ -401,11 +445,11 @@ def prepare_subspace_bases(args, trainloader):
     args.subspace_basis_path = basis_path
 
     if os.path.isfile(basis_path):
-        print(f"[GPGD] Loaded PCA bases: {basis_path}")
+        print(f"[SUB] 加载 PCA bases: {basis_path}")
         args.subspace_bases = load_pca_bases(basis_path, device=device)
         return
 
-    print("[GPGD] PCA bases not found, building (may take time)...")
+    print("[SUB] 未找到 PCA bases，开始构建（可能耗时）...")
     args.subspace_bases = build_pca_bases(
         trainloader,
         n_classes=args.n_cls,
@@ -415,12 +459,15 @@ def prepare_subspace_bases(args, trainloader):
     )
     os.makedirs(os.path.dirname(basis_path) or '.', exist_ok=True)
     save_pca_bases(basis_path, args.subspace_bases)
-    print(f"[GPGD] PCA bases saved: {basis_path}")
+    print(f"[SUB] PCA bases 已保存: {basis_path}")
 
+
+def _should_batch_eval_forwards(dataset_name: str) -> bool:
+    return _infer_input_size(dataset_name) <= 64
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Training: Predict domain for routing + update clustering every N iters
+#  训练：统一用"预测 domain"进行路由 + 每 N iter 动态聚类更新
 # ══════════════════════════════════════════════════════════════════════════
 def train(epoch, trainloader, criterion, optimizer, n_classes, model,
           initial_lr_main=0.001, initial_lr_domain=0.003, args=None, global_iter_start=0):
@@ -432,22 +479,24 @@ def train(epoch, trainloader, criterion, optimizer, n_classes, model,
     losses = {k: AverageMeter() for k in ['cls', 'domain', 'total']}
     domains = list(args.train_attacks)
 
-    # [Modified] Track classification and domain accuracy separately during training
+    # [修改] 训练时分别记录分类准确率和域准确率
     train_cls_accs = {d: AverageMeter() for d in domains}
     train_dom_accs = {d: AverageMeter() for d in domains}
 
     domain_acc_meter = AverageMeter()
 
-    # Training: standard PGD-10 (NOT APGD — lighter attack for efficient multi-attack training)
-    atk_apgd_linf = _build_train_pgd_attack(model, norm='Linf', eps=8 / 255, steps=10)  # PGD-10, named atk_apgd_linf for API compat
-    atk_apgd_l2 = _build_train_pgd_attack(model, norm='L2', eps=0.5, steps=10)          # PGD-10
+    # ★ 记录本 epoch 使用的温度统计
+
+    # ★ 模型内部已处理标准化，torchattacks 不需要再设置
+    atk_apgd_linf = _build_train_pgd_attack(model, norm='Linf', eps=8 / 255, steps=10)
+    atk_apgd_l2 = _build_train_pgd_attack(model, norm='L2', eps=0.5, steps=10)
 
     model.train()
     pbar = tqdm(trainloader, leave=True, desc=f"Train {epoch}")
     global_iter = global_iter_start
 
-    # Scale color/light attack learning rates
-    lr_scale = 1.0
+    # ★ tiny 数据集时缩放颜色/光照类攻击 lr
+    lr_scale = 0.1 if _is_tiny_dataset(getattr(args, "dataset", None)) else 1.0
 
     for step_idx, (img, tgt) in enumerate(pbar, start=1):
         img = img.to(device, non_blocking=True)
@@ -455,12 +504,15 @@ def train(epoch, trainloader, criterion, optimizer, n_classes, model,
         bsz = img.size(0)
         source_ids_per_attack = torch.arange(len(domains), device=device, dtype=torch.long).repeat_interleave(bsz)
 
-        # Generate adversarial examples
+        # 生成对抗样本（传入动态 n_classes）
         model.eval()
 
-        # Enable BPDA surrogate gradient to bypass hard routing
+        # =========== 【核心改动】 ===========
+
+        # 2. 开启 BPDA，让攻击能够穿透 DomainClassifier
         if hasattr(model, "set_bpda"):
             model.set_bpda(True)
+        # ===================================
 
         attack_inputs = generate_attack_batch(
             img, tgt, model, device,
@@ -472,35 +524,32 @@ def train(epoch, trainloader, criterion, optimizer, n_classes, model,
             subspace_bases=getattr(args, 'subspace_bases', None)
         )
 
-        # Disable BPDA surrogate after attack generation to train with hard routing
+        # =========== 【修改】 ===========
+        # 3. 攻击生成完毕，关闭 BPDA，保证训练权重时使用的是真实的 Hard Routing
         if hasattr(model, "set_bpda"):
             model.set_bpda(False)
 
         imgs_mix = [attack_inputs[d] for d in domains]
 
-        # Update global mapping every map_update_every steps
         global_iter += 1
         if epoch < 10:
             if global_iter % args.map_update_every == 0 or global_iter == 1:
                 with torch.no_grad():
-                    model.extract_spectral_features(torch.cat(imgs_mix, dim=0), source_ids_per_attack)
+                    model.extract_wavelet_features(torch.cat(imgs_mix, dim=0), source_ids_per_attack)
 
-        # Update domain mappings
         if global_iter % args.map_update_every == 0 or global_iter == 1:
             model.update_domain_mappings(epoch, args.end_epoch)
 
-        # Assign domain labels
         domain_labels = source_ids_per_attack
         true_domain_labels = model.get_domain_labels(domain_labels)
 
-        # Forward pass with domain assignments
         model.train()
         combined = torch.cat(imgs_mix, 0).detach()
 
-        outputs = model(combined, domain_ids=domain_labels)
+        outputs = model(combined, None, criterion, bsz, flag=1, domain_ids=domain_labels)
         cls_logits, _, domain_logits, _ = outputs
 
-        # Domain loss
+        # domain ??
         domain_loss = F.cross_entropy(domain_logits, true_domain_labels)
         losses['domain'].update(domain_loss, combined.size(0))
 
@@ -509,7 +558,6 @@ def train(epoch, trainloader, criterion, optimizer, n_classes, model,
             domain_acc = (pred_domain == true_domain_labels).float().mean() * 100
             domain_acc_meter.update(domain_acc, combined.size(0))
 
-        # Classification loss and accuracy
         repeated_tgt = tgt.repeat(len(domains))
         for i, dname in enumerate(domains):
             dom_out = cls_logits[bsz * i:bsz * (i + 1)]
@@ -532,7 +580,7 @@ def train(epoch, trainloader, criterion, optimizer, n_classes, model,
         total_loss.backward()
         optimizer.step()
 
-        # Update tqdm progress bar
+        # tqdm 展示: 实时显示
         if step_idx % args.log_every == 0:
             status = model.get_all_mapping_statuses().get("global_mapping", {})
             pbar.set_postfix({
@@ -546,157 +594,188 @@ def train(epoch, trainloader, criterion, optimizer, n_classes, model,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Validation
+#  验证：使用当前评估配置
+#  ★ 核心改动：SPSA 仅在指定 epoch 评估
 # ══════════════════════════════════════════════════════════════════════════
 def validation_pgd(epoch, testloader, criterion, model, n_cls,
                    acc_hist=None, domain_hist=None, args=None):
     """
-    Validation function with configurable attack selection.
+    验证函数，支持可配置的攻击选择。
 
     Args:
-        args.attacks: List of attacks to evaluate, e.g. ['Clean', 'Linf_APGD', 'L2_APGD', ...]
-                      Use 'Linf_APGD'/'L2_APGD' for APGD-100 evaluation (recommended).
-                      Use 'Linf_PGD'/'L2_PGD' for standard PGD-10 (training-time attack only).
+        args.attacks: 要评估的攻击列表，例如 ['Clean', 'APGD_Linf', 'APGD_L2', 'SPSA', ...]
     """
-    # Get selected attacks
+    # 获取选择的攻击
     selected_attacks = args.attacks if args and hasattr(args, 'attacks') else ALL_ATTACKS
-    if 'GPGD' in selected_attacks and getattr(args, 'subspace_bases', None) is None:
-        raise RuntimeError("GPGD evaluation selected but PCA bases not prepared")
+    if 'SUB' in selected_attacks and getattr(args, 'subspace_bases', None) is None:
+        raise RuntimeError("选择了 SUB 评估，但未准备 PCA bases")
 
-    print(f"\n[Validation] Selected attacks: {selected_attacks}")
+    print(f"\n[Validation] 选择的攻击: {selected_attacks}")
+
+    # ★ 为每个温度创建独立的指标存储
 
     selected_attacks_runtime = list(selected_attacks)
+    if 'SPSA' in selected_attacks_runtime and epoch not in SPSA_EVAL_EPOCHS:
+        selected_attacks_runtime.remove('SPSA')
+        print(f"[Validation] 跳过 SPSA（仅在 epoch {sorted(SPSA_EVAL_EPOCHS)} 评估）")
 
     atk_apgd_linf = None
     atk_apgd_l2 = None
-    # Evaluation: Auto-PGD-100 (stronger than training PGD-10)
-    if 'Linf_APGD' in selected_attacks_runtime:
+    atk_spsa = None
+    if 'APGD_Linf' in selected_attacks_runtime:
         atk_apgd_linf = _build_apgd_attack(model, norm='Linf', eps=8 / 255, steps=100)
-    if 'L2_APGD' in selected_attacks_runtime:
+    if 'APGD_L2' in selected_attacks_runtime:
         atk_apgd_l2 = _build_apgd_attack(model, norm='L2', eps=0.5, steps=100)
+    if 'SPSA' in selected_attacks_runtime:
+        atk_spsa = SPSA(model, eps=8 / 255, delta=0.01, lr=0.01,
+                        nb_iter=20, nb_sample=128, max_batch_size=32)
 
-    metrics = {k: AverageMeter() for k in selected_attacks_runtime}
-    domain_accs = {k: AverageMeter() for k in selected_attacks_runtime if k in DOMAIN_ATTACKS}
+        print(f"\n{'='*70}")
+        print(f"{'='*70}")
 
-    cm = torch.zeros(model.num_threat_domains, model.num_threat_domains, dtype=torch.long)
-    model.eval()
+        # 为当前温度初始化指标
+        metrics = {k: AverageMeter() for k in selected_attacks_runtime}
+        domain_accs = {k: AverageMeter() for k in selected_attacks_runtime if k in DOMAIN_ATTACKS}
 
-    pbar = tqdm(testloader, desc=f"Val Ep{epoch}", leave=True)
+        cm = torch.zeros(model.num_threat_domains, model.num_threat_domains, dtype=torch.long)
+        model.eval()
 
-    lr_scale = 1.0
-    batch_eval_forwards = True
+        pbar = tqdm(testloader, desc=f"Val Ep{epoch}", leave=True)
 
-    for step_idx, (img, tgt) in enumerate(pbar, start=1):
-        img = img.to(device, non_blocking=True)
-        tgt = tgt.to(device, non_blocking=True)
-        bsz = img.size(0)
+        lr_scale = 0.1 if _is_tiny_dataset(getattr(args, "dataset", None)) else 1.0
+        batch_eval_forwards = _should_batch_eval_forwards(getattr(args, "dataset", None))
 
-        # Enable BPDA surrogate gradient to bypass hard routing
-        if hasattr(model, "set_bpda"):
-            model.set_bpda(True)
+        for step_idx, (img, tgt) in enumerate(pbar, start=1):
+            img = img.to(device, non_blocking=True)
+            tgt = tgt.to(device, non_blocking=True)
+            bsz = img.size(0)
 
-        # ─── Generate adversarial examples ──────────────────────────────
-        attack_inputs = generate_attack_batch(
-            img, tgt, model, device,
-            attack_names=selected_attacks_runtime,
-            atk_apgd_linf=atk_apgd_linf,
-            atk_apgd_l2=atk_apgd_l2,
+            # ========== ★ 攻击生成阶段：使用当前评估温度 ==========
+            if hasattr(model, "set_bpda"):
+                model.set_bpda(True)
 
-            lr_scale=lr_scale,
-            ncls=n_cls,
-            subspace_bases=getattr(args, 'subspace_bases', None)
-        )
+            # ─── 根据选择的攻击生成对抗样本 ──────────────────────────────
+            attack_inputs = generate_attack_batch(
+                img, tgt, model, device,
+                attack_names=selected_attacks_runtime,
+                atk_apgd_linf=atk_apgd_linf,
+                atk_apgd_l2=atk_apgd_l2,
+                atk_spsa=atk_spsa,
+                lr_scale=lr_scale,
+                ncls=n_cls,
+                subspace_bases=getattr(args, 'subspace_bases', None)
+            )
 
-        domain_ids = {}
-        for name in attack_inputs.keys():
-            if name not in DOMAIN_ATTACKS:
-                continue
-            domain_idx = _domain_id_from_attack(name, args.domain_names)
-            if domain_idx is None:
-                continue
-            domain_ids[name] = torch.full((bsz,), domain_idx, device=device, dtype=torch.long)
+            domain_ids = {}
+            for name in attack_inputs.keys():
+                if name not in DOMAIN_ATTACKS:
+                    continue
+                domain_idx = _domain_id_from_attack(name, args.domain_names)
+                if domain_idx is None:
+                    continue
+                domain_ids[name] = torch.full((bsz,), domain_idx, device=device, dtype=torch.long)
 
-        # Disable BPDA surrogate for evaluation forward pass
-        if hasattr(model, "set_bpda"):
-            model.set_bpda(False)
+            # ========== ★ 攻击生成完：关闭 BPDA（评估 forward 保持原逻辑） ==========
+            if hasattr(model, "set_bpda"):
+                model.set_bpda(False)
 
-        # ─── Evaluate each attack ────────────────────────────────────────────
-        with torch.no_grad():
-            if batch_eval_forwards and attack_inputs:
-                ordered_names = list(attack_inputs.keys())
-                combined_inputs = torch.cat([attack_inputs[name] for name in ordered_names], dim=0)
-                out_tuple = model(combined_inputs, domain_ids=None)
-                logits_all = out_tuple[0] if isinstance(out_tuple, tuple) else out_tuple
-                domain_logits_all = out_tuple[2] if isinstance(out_tuple, tuple) and len(out_tuple) > 2 else None
+            # ─── 评估每个攻击 ────────────────────────────────────────────
+            with torch.no_grad():
+                if batch_eval_forwards and attack_inputs:
+                    ordered_names = list(attack_inputs.keys())
+                    combined_inputs = torch.cat([attack_inputs[name] for name in ordered_names], dim=0)
+                    out_tuple = model(combined_inputs, domain_ids=None)
+                    logits_all = out_tuple[0] if isinstance(out_tuple, tuple) else out_tuple
+                    domain_logits_all = out_tuple[2] if isinstance(out_tuple, tuple) and len(out_tuple) > 2 else None
 
-                for idx, name in enumerate(ordered_names):
-                    start = idx * bsz
-                    end = start + bsz
-                    logits = logits_all[start:end]
-                    acc1 = accuracy(logits, tgt, (1,))[0]
-                    metrics[name].update(acc1.item(), bsz)
+                    for idx, name in enumerate(ordered_names):
+                        start = idx * bsz
+                        end = start + bsz
+                        logits = logits_all[start:end]
+                        acc1 = accuracy(logits, tgt, (1,))[0]
+                        metrics[name].update(acc1.item(), bsz)
 
-                    if name in domain_ids and domain_logits_all is not None:
-                        domain_logit = domain_logits_all[start:end]
-                        pred_domain = domain_logit.max(1)[1]
-                        true_domain = model.get_domain_labels(domain_ids[name])
-                        d_acc = (pred_domain == true_domain).float().mean() * 100
-                        domain_accs[name].update(d_acc.item(), bsz)
+                        if name in domain_ids and domain_logits_all is not None:
+                            domain_logit = domain_logits_all[start:end]
+                            pred_domain = domain_logit.max(1)[1]
+                            true_domain = model.get_domain_labels(domain_ids[name])
+                            d_acc = (pred_domain == true_domain).float().mean() * 100
+                            domain_accs[name].update(d_acc.item(), bsz)
 
-                        _update_confusion_matrix(cm, true_domain, pred_domain)
-            else:
-                for name, x_in in attack_inputs.items():
-                    out_tuple = model(x_in, domain_ids=None)  # Uniformly use predicted routing
-                    logits = out_tuple[0] if isinstance(out_tuple, tuple) else out_tuple
-                    acc1 = accuracy(logits, tgt, (1,))[0]
-                    metrics[name].update(acc1.item(), bsz)
+                            _update_confusion_matrix(cm, true_domain, pred_domain)
+                else:
+                    for name, x_in in attack_inputs.items():
+                        out_tuple = model(x_in, domain_ids=None)  # 统一用预测路由
+                        logits = out_tuple[0] if isinstance(out_tuple, tuple) else out_tuple
+                        acc1 = accuracy(logits, tgt, (1,))[0]
+                        metrics[name].update(acc1.item(), bsz)
 
-                    # Domain accuracy (only if ground-truth domain label exists)
-                    if name in domain_ids and isinstance(out_tuple, tuple) and len(out_tuple) > 2:
-                        domain_logit = out_tuple[2]
-                        pred_domain = domain_logit.max(1)[1]
-                        true_domain = model.get_domain_labels(domain_ids[name])
-                        d_acc = (pred_domain == true_domain).float().mean() * 100
-                        domain_accs[name].update(d_acc.item(), bsz)
+                        # 域准确率（仅有对应真域标签时统计）
+                        if name in domain_ids and isinstance(out_tuple, tuple) and len(out_tuple) > 2:
+                            domain_logit = out_tuple[2]
+                            pred_domain = domain_logit.max(1)[1]
+                            true_domain = model.get_domain_labels(domain_ids[name])
+                            d_acc = (pred_domain == true_domain).float().mean() * 100
+                            domain_accs[name].update(d_acc.item(), bsz)
 
-                        _update_confusion_matrix(cm, true_domain, pred_domain)
+                            _update_confusion_matrix(cm, true_domain, pred_domain)
 
-        # ─── Build tqdm postfix: Attack=ClsAcc/DomAcc ────────────────────────
-        if step_idx % args.log_every == 0:
-            postfix_dict = {}
-            for k in selected_attacks_runtime:
-                if k in metrics:
-                    cls_acc_str = f"{metrics[k].avg:.1f}"
-                    if k in domain_accs and domain_accs[k].count > 0:
-                        dom_acc_str = f"{domain_accs[k].avg:.1f}"
-                        postfix_dict[k] = f"{cls_acc_str}/{dom_acc_str}"
-                    else:
-                        postfix_dict[k] = cls_acc_str
-            pbar.set_postfix(postfix_dict)
+            # ─── 构建 tqdm postfix: Attack=ClsAcc/DomAcc ────────────────────────
+            if step_idx % args.log_every == 0:
+                postfix_dict = {}
+                for k in selected_attacks_runtime:
+                    if k in metrics:
+                        cls_acc_str = f"{metrics[k].avg:.1f}"
+                        if k in domain_accs and domain_accs[k].count > 0:
+                            dom_acc_str = f"{domain_accs[k].avg:.1f}"
+                            postfix_dict[k] = f"{cls_acc_str}/{dom_acc_str}"
+                        else:
+                            postfix_dict[k] = cls_acc_str
+                pbar.set_postfix(postfix_dict)
 
-    pbar.close()
+        pbar.close()
 
-    # ─── Print validation summary ─────────────────────────────────────────────────────
-    print(f"\n{'='*70}")
-    print(f"Validation Summary (Epoch {epoch})")
-    print("=" * 70)
-    print(f"{'Attack':<15} {'Cls Acc':>12} {'Dom Acc':>12}")
-    print("-" * 70)
+        # ─── 打印当前温度的验证汇总 ────────────────────────────────────────────
+        print(f"\n{'='*70}")
+        print(f"验证汇总 T={eval_T} (分类准确率 / 域分类准确率)")
+        print("=" * 70)
+        print(f"{'攻击':<15} {'分类准确率':>12} {'域准确率':>12} {'格式':>15}")
+        print("-" * 70)
+        for k in selected_attacks_runtime:
+            if k in metrics:
+                cls_acc = metrics[k].avg
+                if k in domain_accs and domain_accs[k].count > 0:
+                    dom_acc = domain_accs[k].avg
+                    fmt_str = f"{cls_acc:.1f}/{dom_acc:.1f}"
+                    print(f"{k:<15} {cls_acc:>11.2f}% {dom_acc:>11.2f}% {fmt_str:>15}")
+                else:
+                    print(f"{k:<15} {cls_acc:>11.2f}% {'N/A':>12} {cls_acc:>15.1f}")
+        print("=" * 70)
+
+        if cm.sum() > 0:
+            print(f"\n域混淆矩阵 T={eval_T} (行=真实, 列=预测):")
+            print(cm.cpu().numpy())
+
+        # 存储当前温度的结果
+        
+        
+
+    # ═══════════════════════════════════════════════════════════════════════
+    #  打印当前温度汇总
+    # ═══════════════════════════════════════════════════════════════════════
+    print(f"\n{'#'*80}")
+    print(f"  ★★★ 验证汇总 (Epoch {epoch}) ★★★")
+    print(f"{'#'*80}")
+
+    print(f"{'Attack':<12} | {'Cls%':>9}")
+    print('-' * 24)
     for k in selected_attacks_runtime:
         if k in metrics:
-            cls_acc = metrics[k].avg
-            if k in domain_accs and domain_accs[k].count > 0:
-                dom_acc = domain_accs[k].avg
-                print(f"{k:<15} {cls_acc:>11.2f}% {dom_acc:>11.2f}%")
-            else:
-                print(f"{k:<15} {cls_acc:>11.2f}% {'N/A':>12}")
-    print("=" * 70)
+            print(f"{k:<12} | {metrics[k].avg:>9.2f}%")
 
-    if cm.sum() > 0:
-        print("\nDomain confusion matrix (rows=true, cols=pred):")
-        print(cm.cpu().numpy())
+    print(f"{'#'*80}\n")
 
-    # Update history records
+    # 更新历史记录
     if acc_hist is not None:
         for k, v in metrics.items():
             acc_hist.setdefault(k, []).append(v.avg)
@@ -707,7 +786,7 @@ def validation_pgd(epoch, testloader, criterion, model, n_cls,
                 domain_hist.setdefault(k, []).append(v.avg)
 
     clean_acc = metrics['Clean'].avg if 'Clean' in metrics else 0.0
-    apgd_linf_acc = metrics['Linf_APGD'].avg if 'Linf_APGD' in metrics else 0.0
+    apgd_linf_acc = metrics['APGD_Linf'].avg if 'APGD_Linf' in metrics else 0.0
 
     return clean_acc, apgd_linf_acc, acc_hist, domain_hist
 
@@ -722,7 +801,7 @@ def save_checkpoint(model, optimizer, epoch, path, acc_hist=None, domain_hist=No
              "epoch": epoch,
              "accuracy_history": acc_hist,
              "domain_acc_history": domain_hist}
-
+    # torch.save(state, os.path.join(path, f"checkpoint_epoch_{epoch}.pth"))
     torch.save(state, os.path.join(path, "latest_model.pth"))
 
 
@@ -732,21 +811,21 @@ def load_checkpoint(model, optimizer, ckpt_path, base_main_lr=0.001, base_domain
         ckpt = torch.load(ckpt_path, map_location=load_dev, weights_only=False)
     except TypeError:
         ckpt = torch.load(ckpt_path, map_location=load_dev)
-    # Allow slight architecture mismatches (e.g., domain count changes)
+    # 允许与当前构造略有不一致（例如 domains 变动）
     missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
     if missing or unexpected:
-        print(f"[WARN] state_dict mismatch, missing={len(missing)}, unexpected={len(unexpected)}")
+        print(f"[WARN] state_dict 不完全匹配，missing={len(missing)}, unexpected={len(unexpected)}")
     try:
         optimizer.load_state_dict(ckpt["optimizer"])
     except Exception as e:
-        print(f"[WARN] Failed to load optimizer state (different group structure?). Ignored:{e}")
+        print(f"[WARN] 加载优化器状态失败（分组结构不同？）已忽略：{e}")
     set_group_lrs(optimizer, base_main_lr, base_domain_lr)
-    print(f"=> Resumed from epoch {ckpt['epoch']}, learning rates reset to main={base_main_lr} / domain={base_domain_lr}")
+    print(f"=> 恢复自 epoch {ckpt['epoch']}，学习率已重设为 main={base_main_lr} / domain={base_domain_lr}")
     return ckpt["epoch"] + 1, ckpt.get("accuracy_history"), ckpt.get("domain_acc_history")
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  Main entry point
+#  主函数
 # ══════════════════════════════════════════════════════════════════════════
 def _resume_eval_history_len(acc_hist, args):
     if not acc_hist:
@@ -754,7 +833,7 @@ def _resume_eval_history_len(acc_hist, args):
 
     preferred_attacks = ['Clean']
     if args is not None and hasattr(args, 'attacks'):
-        preferred_attacks.extend([atk for atk in args.attacks if atk != 'Clean'])
+        preferred_attacks.extend([atk for atk in args.attacks if atk not in ('Clean', 'SPSA')])
 
     seen = set()
     for attack_name in preferred_attacks:
@@ -764,9 +843,9 @@ def _resume_eval_history_len(acc_hist, args):
         if attack_name in acc_hist:
             return len(acc_hist[attack_name])
 
-    all_lengths = [len(vals) for vals in acc_hist.values()]
-    if all_lengths:
-        return max(all_lengths)
+    non_spsa_lengths = [len(vals) for name, vals in acc_hist.items() if name != 'SPSA']
+    if non_spsa_lengths:
+        return max(non_spsa_lengths)
     return 0
 
 
@@ -790,22 +869,22 @@ def _should_run_resume_eval(last_completed_epoch, acc_hist, args):
 
 
 def main(args):
-    print("==> Preparing data ...")
+    print("==> 准备数据 …")
     trainloader, testloader = GetDataLoader(args.dataset,
                                             args.batch_size,
                                             args.test_batch_size,
-                                            './datasets/',
+                                            args.dataset_path,
                                             num_workers=args.num_workers,
                                             pin_memory=not args.disable_pin_memory,
                                             persistent_workers=not args.disable_persistent_workers,
                                             prefetch_factor=args.prefetch_factor)
 
-    # Prepare PCA bases for GPGD attack if needed
+    # SUB 攻击所需 PCA bases（按需准备）
     prepare_subspace_bases(args, trainloader)
 
-    print("==> Building model ...")
-    # Use create_encoder factory to build model based on backbone and attack_config
-    # Pass dataset parameter so model auto-selects correct normalization stats
+    print("==> 构建模型 …")
+    # 使用 create_encoder 工厂函数，根据 backbone 和 attack_config 创建模型
+    # 传入 dataset 参数，模型内部会自动选择正确的标准化参数
     model_kwargs = dict(
         backbone=args.backbone,
         dataset=args.dataset,
@@ -816,12 +895,13 @@ def main(args):
         source_names=args.domain_names
     )
     if args.backbone == 'mobilevit':
-        model_kwargs['size'] = 32  # CIFAR-10/100
+        model_kwargs['size'] = _infer_input_size(args.dataset)
+        model_kwargs['mvit_fdconv'] = bool(getattr(args, 'mvit_fdconv', False))
 
     model = create_encoder(**model_kwargs).to(device)
     model.count_frequency_convolutions()
 
-    # ── Group optimizer: higher lr for threat_domain_classifier ─────────────────────
+    # ── 分组优化器：threat_domain_classifier 用更大学习率 ─────────────────────
     domain_params = list(model.threat_domain_classifier.parameters())
     domain_param_ids = set(id(p) for p in domain_params)
     main_params = [p for p in model.parameters() if id(p) not in domain_param_ids]
@@ -832,7 +912,7 @@ def main(args):
     ])
     set_group_lrs(optimizer, args.lr, args.lr_domain)
 
-    # Initialize history records based on selected attacks
+    # 根据选择的攻击初始化历史记录
     acc_hist = {k: [] for k in args.attacks}
     domain_hist = {k: [] for k in args.attacks if k in DOMAIN_ATTACKS}
 
@@ -851,20 +931,25 @@ def main(args):
     print("=" * 60)
     print(f"Dataset: {args.dataset}")
     print(f"n_cls (auto): {args.n_cls}")
-    print(f"Initial learning rate main={args.lr} | domain={args.lr_domain} | Schedule: 0-49x1, 50-69x0.1, >=70x0.01")
+    print(f"初始学习率 main={args.lr} | domain={args.lr_domain} | 调度: 0-49×1, 50-74×0.1, ≥75×0.01")
     print(f"domain_loss_weight: {args.domain_loss_weight}")
     print(f"map_update_every: {args.map_update_every} iters")
-    print(f"domains(clusters/domains)={args.domains}")
-    print(f"Training attacks: {args.train_attacks}")
-    print("attack_lr_scale: 1.0")
-    print(f"Selected evaluation attacks: {args.attacks}")
+    print(f"domains(聚类/域数)={args.domains}")
+    print(f"训练攻击: {args.train_attacks}")
+    print(
+        f"attack_lr_scale: {'0.1 (tiny)' if _is_tiny_dataset(args.dataset) else '1.0'}  ← 作用于 ACE/Hue/ReColorAdv/Light/UAA")
+    print(f"选择的评估攻击: {args.attacks}")
     if getattr(args, 'subspace_bases', None) is not None:
-        print(f"GPGD PCA bases: {args.subspace_basis_path}")
+        print(f"SUB PCA bases: {args.subspace_basis_path}")
+    if _is_imagenette_dataset(args.dataset):
+        print("[Note] Imagenette uses higher-resolution inputs; current attack defaults come from low-res experiments, so please retune before final reporting.")
+    print("=" * 60)
+    print(f"   - SPSA: 仅在 epoch ∈ {sorted(SPSA_EVAL_EPOCHS)} 时评估")
     print("=" * 60)
 
     last_completed_epoch = start_epoch - 1
     if args.resume and _should_run_resume_eval(last_completed_epoch, acc_hist, args):
-        print(f"[Resume] Detected missing evaluation/curves for epoch {last_completed_epoch} , running initial validation.")
+        print(f"[Resume] 检测到 epoch {last_completed_epoch} 的评估/曲线缺失，先补做一次验证。")
         validation_pgd(last_completed_epoch, testloader, criterion,
                        model, args.n_cls,
                        acc_hist, domain_hist, args=args)
@@ -893,81 +978,94 @@ def main(args):
             save_checkpoint(model, optimizer, epoch,
                             args.result_dir, acc_hist, domain_hist)
 
+        # ★ [ADDED IN COPY] harmful-routing eval (gateatk) at epoch 25/50/75 -> table + plots in result_dir/hr_eval
+        if epoch in (25, 50, 75):
+            try:
+                from hr_eval_gateatk import run_hr_eval
+                print(f"[HR-EVAL] launching harmful-routing eval at epoch {epoch} ...", flush=True)
+                run_hr_eval(model, testloader, args, device, epoch, args.result_dir)
+            except Exception as _hre:
+                import traceback
+                print(f"[HR-EVAL] failed at epoch {epoch}: {_hre}", flush=True)
+                traceback.print_exc()
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("TaFD: Threat-aware Frequency Decoupling — Adversarial Training")
+    parser = argparse.ArgumentParser("Unified-LR Adversarial Training + PGD-Train APGD-Test + Fixed BPDA-T")
     parser.add_argument("--dataset", type=str, default="CIFAR100",
-                        help="Dataset name (e.g., CIFAR10 / CIFAR100)")
-    parser.add_argument("--lr", type=float, default=0.001, help="Main backbone learning rate")
-    parser.add_argument("--lr_domain", type=float, default=0.001, help="Domain classifier learning rate")
+                        help="数据集名称（例如 Tiny_32_10class / Tiny_32_200class / CIFAR10 / CIFAR100 等）")
+    parser.add_argument("--dataset_path", type=str, default="./datasets/",
+                        help="Root directory containing downloaded datasets.")
+    parser.add_argument("--lr", type=float, default=0.001, help="主干学习率")
+    parser.add_argument("--lr_domain", type=float, default=0.001, help="domain_classifier 学习率（建议 3~10 倍）")
     parser.add_argument("--weight_decay", type=float, default=2e-4)
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--test_batch_size", type=int, default=16, help="Validation/test batch size")
-    parser.add_argument("--num_workers", type=int, default=8, help="DataLoader workers")
+    parser.add_argument("--test_batch_size", type=int, default=16, help="??/?? batch size")
+    parser.add_argument("--num_workers", type=int, default=8, help="DataLoader worker 数")
     parser.add_argument("--prefetch_factor", type=int, default=2, help="DataLoader prefetch_factor")
-    parser.add_argument("--disable_pin_memory", action="store_true", help="Disable DataLoader pin_memory")
-    parser.add_argument("--disable_persistent_workers", action="store_true", help="Disable DataLoader persistent_workers")
-    parser.add_argument("--log_every", type=int, default=10, help="Tqdm update interval (iterations)")
+    parser.add_argument("--disable_pin_memory", action="store_true", help="关闭 DataLoader pin_memory")
+    parser.add_argument("--disable_persistent_workers", action="store_true", help="关闭 DataLoader persistent_workers")
+    parser.add_argument("--log_every", type=int, default=10, help="每隔多少个 iter 更新一次 tqdm 指标")
     parser.add_argument("--start_epoch", type=int, default=0)
     parser.add_argument("--end_epoch", type=int, default=76)
-    parser.add_argument("--eval_freq", type=int, default=15)
-    parser.add_argument("--resume", type=str,
-                        default="")
+    parser.add_argument("--eval_freq", type=int, default=25)
+    parser.add_argument("--resume", type=str, default="",
+                        help="Optional checkpoint path for resuming training or evaluation.")
     parser.add_argument("--result_dir", type=str,
                         default="")
-    # Keep n_cls parameter, but it will be overwritten by auto-inference
+    # 保留 n_cls 参数，但会被自动推断覆盖
     parser.add_argument("--n_cls", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
 
-    # Number of domains/clusters (controls domain classifier, clusters, experts)
-    parser.add_argument("--domains", type=int, default=6, help="Number of domains/clusters")
+    # 域/聚类数（控制域分类器、聚类、专家数）
+    parser.add_argument("--domains", type=int, default=1, help="domain/聚类数")
 
-    # Domain supervision weight
+    # domain 监督权重
     parser.add_argument("--domain_loss_weight", type=float, default=1.0,
-                        help="Weight of domain supervision in total loss")
-    # Dynamic clustering frequency (iterations)
+                        help="总损失中 domain 监督的权重系数")
+    # 动态聚类频率（迭代步）
     parser.add_argument("--map_update_every", type=int, default=50)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Attack selection parameters
+    #  攻击选择参数
     # ══════════════════════════════════════════════════════════════════════════
     parser.add_argument("--attacks", type=str, nargs='+',
                         default=None,
-                        choices=['Clean',
-                                 'Linf_PGD', 'L2_PGD',          # training PGD-10
-                                 'Linf_APGD', 'L2_APGD',        # evaluation APGD-100
-                                 'ACE', 'ReColorAdv', 'HSVAdv', 'ALA', 'RetouchUAA', 'GPGD', 'StAdv'],
-                        help="List of attacks to evaluate. Linf_APGD/L2_APGD use APGD-100 (eval); Linf_PGD/L2_PGD use PGD-10 (train).")
+                        choices=['Clean', 'APGD_Linf', 'APGD_L2', 'SPSA', 'ACE', 'ReColorAdv', 'Hue', 'Light', 'UAA', 'SUB', 'STADV'],
+                        help="要评估的攻击列表；留空时随 --attack_config 自动设置。")
 
     parser.add_argument("--subspace_basis_path", type=str, default="",
-                        help="Path to GPGD attack PCA bases; auto-placed in result_dir if empty")
+                        help="SUB 攻击 PCA bases 路径；留空则自动放在 result_dir 下")
     parser.add_argument("--subspace_rank", type=int, default=128,
-                        help="GPGD attack PCA rank")
+                        help="SUB 攻击 PCA rank")
     parser.add_argument("--subspace_max_per_class", type=int, default=600,
-                        help="Max samples per class when building GPGD PCA bases")
+                        help="构建 SUB PCA bases 时每类最多采样数")
 
     # ══════════════════════════════════════════════════════════════════════════
-    # Attack configuration and model architecture selection
+    #  新增：攻击配置和模型架构选择
     # ══════════════════════════════════════════════════════════════════════════
     parser.add_argument("--attack_config", type=str, default='v10',
                         choices=['v10', 'v20'],
-                        help="Attack config: v10 (7 attacks) or v20 (5 attacks)")
+                        help="攻击配置: v10=APGD_Linf/APGD_L2/ACE/Hue/ReColorAdv/Light/UAA(7种); v20=APGD_Linf/APGD_L2/ACE/SUB/STADV(5种)")
     parser.add_argument("--backbone", type=str, default='resnet',
                         choices=['resnet', 'mobilevit'],
-                        help="Model backbone: resnet or mobilevit")
+                        help="模型骨架: resnet 或 mobilevit")
+    parser.add_argument("--mvit_fdconv", action="store_true",
+                        help="mobilevit: 把每个 MobileViTBlock 的入口卷积 conv1 换成 FDConv(按域路由的满卷积专家), "
+                             "attention 主体共享。与 ResNet '阶段头部专家' 理念一致; 仅 backbone=mobilevit 生效。")
     parser.add_argument("--gpu", type=int, default=0,
-                        help="GPU device index (e.g., 0, 1, 2 ...)")
+                        help="GPU 编号（例如 0, 1, 2 ...）")
 
     args = parser.parse_args()
 
-    # Set GPU
+    # ★★★ 设置 GPU
     if torch.cuda.is_available() and args.gpu >= 0:
         torch.cuda.set_device(args.gpu)
         device = torch.device(f"cuda:{args.gpu}")
     else:
         device = torch.device("cpu")
 
-    # Automatically set num_sources based on attack config
+    # ★★★ 根据攻击配置自动设置 num_sources
     attack_cfg = ATTACK_CONFIGS[args.attack_config]
     args.num_sources = attack_cfg['num_sources']
     args.train_attacks = list(attack_cfg['train_attacks'])
@@ -978,27 +1076,26 @@ if __name__ == "__main__":
     if not args.attacks:
         args.attacks = list(args.test_attacks)
 
-    # Automatically infer n_cls (CIFAR-100->100; CIFAR-10->10)
+    # ★★★ 自动推断 n_cls（CIFAR-100→100；Tiny/CIFAR-10→10；否则保留命令行值）
     inferred_n = _infer_num_classes(args.dataset, fallback=args.n_cls)
     if inferred_n != args.n_cls:
-        print(f"[Info] n_cls auto-updated from {args.n_cls} to {inferred_n} (based on dataset='{args.dataset}')")
+        print(f"[Info] n_cls 从命令行值 {args.n_cls} 自动更新为 {inferred_n}（基于 dataset='{args.dataset}'）")
         args.n_cls = inferred_n
 
-    # Automatically generate result_dir if not specified
+    # ★★★ 自动生成 result_dir（若未指定）—— 规范命名: 数据集/backbone/v攻击配置/k域数/bs/lr/ep/seed
     if not args.result_dir:
         args.result_dir = (
-            f"./results/tafd_{args.backbone}_{args.dataset}_d{args.domains}"
-            f"_{args.attack_config}_lr{args.lr}_dlr{args.lr_domain}"
-            f"_dw{args.domain_loss_weight}_bs{args.batch_size}"
+            f"./results/tafd_{args.dataset}_{args.backbone}_{args.attack_config}"
+            f"_k{args.domains}_bs{args.batch_size}_lr{args.lr}"
             f"_ep{args.end_epoch}_seed{args.seed}"
         )
 
     print(f"[Auto-Config] Dataset: {args.dataset}")
     print(f"[Auto-Config] n_cls: {args.n_cls}")
-    print(f"[Auto-Config] Attack config: {args.attack_config} ({attack_cfg['num_sources']} attacks)")
-    print(f"[Auto-Config] Training attacks: {args.train_attacks}")
-    print(f"[Auto-Config] Model backbone: {args.backbone}")
-    print(f"[Auto-Config] Selected evaluation attacks: {args.attacks}")
+    print(f"[Auto-Config] 攻击配置: {args.attack_config} ({attack_cfg['num_sources']}种攻击)")
+    print(f"[Auto-Config] 训练攻击: {args.train_attacks}")
+    print(f"[Auto-Config] 模型骨架: {args.backbone}")
+    print(f"[Auto-Config] 选择的评估攻击: {args.attacks}")
     print(f"[Auto-Config] result_dir: {args.result_dir}")
 
     os.makedirs(args.result_dir, exist_ok=True)

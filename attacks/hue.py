@@ -1,7 +1,9 @@
 import torch
+import numpy as np
+import torch.nn as nn
 import kornia as K
 import math
-
+import matplotlib.pyplot as plt
 
 
 def CF_HSV(img, param_h, param_s, param_v, steps):  # color filter for HSV
@@ -42,10 +44,10 @@ def CF_HSV(img, param_h, param_s, param_v, steps):  # color filter for HSV
     return img
 
 
-def hsvadv_atk(input, y, model, device, lr=1, max_iterations=10, steps=64, bound=16, ncls=10,
-               norm_mean=None, norm_std=None):
+def hue_atk(input, y, model, device, lr=1, max_iterations=10, steps=64, bound=16, ncls=10,
+            norm_mean=None, norm_std=None):
     """
-    HSVAdv attack function.
+    Hue attack function.
     Note: Model handles normalization internally, so input should be in [0,1] pixel domain.
     norm_mean and norm_std parameters are kept for API compatibility but not used.
     """
@@ -56,6 +58,7 @@ def hsvadv_atk(input, y, model, device, lr=1, max_iterations=10, steps=64, bound
     labels_onehot = torch.zeros(labels.size(0), ncls, device=device)
     labels_onehot.scatter_(1, labels.unsqueeze(1), 1)
     labels_infhot = torch.zeros_like(labels_onehot).scatter_(1, labels.unsqueeze(1), float('inf'))
+
     # Initialize parameters for H, S, V channels
     Paras_h = torch.full((batch_size, 1, steps), 1 / steps, device=device, requires_grad=True)
     Paras_s = torch.full((batch_size, 1, steps), 1 / steps, device=device, requires_grad=True)
@@ -94,3 +97,50 @@ def hsvadv_atk(input, y, model, device, lr=1, max_iterations=10, steps=64, bound
     return best_adversary
 
 
+def visualize_hsv_curves(params_h, params_s, params_v, steps, sample_idx=0, iteration=None):
+    """
+    Visualize the HSV transformation curves for a specific sample
+    """
+    fig, axs = plt.subplots(3, 1, figsize=(10, 15))
+    x_values = np.linspace(0, 1, steps)
+
+    curve_h = params_h[sample_idx, 0, :].detach().cpu().numpy()
+    cumulative_h = np.cumsum(curve_h)
+
+    curve_s = params_s[sample_idx, 0, :].detach().cpu().numpy()
+    cumulative_s = np.cumsum(curve_s)
+
+    curve_v = params_v[sample_idx, 0, :].detach().cpu().numpy()
+    cumulative_v = np.cumsum(curve_v)
+
+    axs[0].plot(x_values, curve_h, 'b-', linewidth=2, label='Hue weights')
+    axs[0].plot(x_values, cumulative_h, 'r-', linewidth=2, label='Cumulative')
+    axs[0].set_xlabel('Hue value (normalized)', fontsize=12)
+    axs[0].set_ylabel('Transform intensity', fontsize=12)
+    axs[0].set_title('Hue Transform Curve', fontsize=14)
+    axs[0].legend(fontsize=12)
+    axs[0].grid(True)
+
+    axs[1].plot(x_values, curve_s, 'b-', linewidth=2, label='Saturation weights')
+    axs[1].plot(x_values, cumulative_s, 'r-', linewidth=2, label='Cumulative')
+    axs[1].set_xlabel('Saturation value', fontsize=12)
+    axs[1].set_ylabel('Transform intensity', fontsize=12)
+    axs[1].set_title('Saturation Transform Curve', fontsize=14)
+    axs[1].legend(fontsize=12)
+    axs[1].grid(True)
+
+    axs[2].plot(x_values, curve_v, 'b-', linewidth=2, label='Value weights')
+    axs[2].plot(x_values, cumulative_v, 'r-', linewidth=2, label='Cumulative')
+    axs[2].set_xlabel('Value', fontsize=12)
+    axs[2].set_ylabel('Transform intensity', fontsize=12)
+    axs[2].set_title('Value Transform Curve', fontsize=14)
+    axs[2].legend(fontsize=12)
+    axs[2].grid(True)
+
+    main_title = 'HSV Transform Curves'
+    if iteration is not None:
+        main_title += f' (Iteration {iteration})'
+    fig.suptitle(main_title, fontsize=16)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.show()

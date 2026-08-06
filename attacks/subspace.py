@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict
 
@@ -69,15 +70,15 @@ def _stack_class_bases(bases_dict, labels, device):
     return A, q
 
 
-def gpgd_atk(input, y, model, device, bases_dict,
-             steps: int = 10,
-             epsilon: float = 2.0,
-             step_size: float = None,
-             ncls: int = 100,
-             proj: str = 'l2',
-             norm_mean=None, norm_std=None):
+def subspace_atk(input, y, model, device, bases_dict,
+                 steps: int = 10,
+                 epsilon: float = 2.0,
+                 step_size: float = None,
+                 ncls: int = 100,
+                 proj: str = 'l2',
+                 norm_mean=None, norm_std=None):
     """
-    GPGD (Guided PGD on-manifold) attack using PCA bases.
+    Subspace on-manifold attack using PCA bases.
     Note: Model handles normalization internally, so input should be in [0,1] pixel domain.
     norm_mean and norm_std parameters are kept for API compatibility but not used.
     """
