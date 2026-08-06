@@ -1,111 +1,195 @@
 # TaFD
 
-Official release repository for TaFD, a threat-aware frequency-domain defense
+Official implementation of **TaFD**, a threat-aware frequency-domain defense
 for heterogeneous adversarial training.
 
-This repository contains the TaFD method code used for the paper submission and
-the ablation entrypoints needed to reproduce the reported TaFD variants.
+The release provides the TaFD training pipeline, the four component ablations
+reported in the paper, the heterogeneous attacks used by the method, and the
+supplemental adaptive diagnosis evaluation.
 
-## Method Components
+## Method Overview
 
-- Threat-domain diagnosis: learns spectral prototypes and assigns heterogeneous
-  attacks to threat domains.
-- Diagnosis-dispatch: routes each input through threat-dependent frequency
-  processing according to the diagnosed domain.
-- Frequency-domain experts: FC-Conv modules apply domain-conditioned frequency
-  transformations before classification.
-- Default setting: K=2 threat domains, matching the main TaFD configuration in
-  the paper.
+TaFD contains three paper-aligned components:
+
+- **Threat-domain diagnosis** groups heterogeneous attack sources into learned
+  threat domains from their spectral characteristics.
+- **Diagnosis-dispatch** selects threat-dependent processing according to the
+  diagnosed domain of each input.
+- **Frequency-conditional convolution (FC-Conv)** applies a learned spectral
+  mask and dispatches features to domain-specialized frequency experts.
+
+The default configuration uses `K=2` threat domains.
 
 ## Repository Layout
 
-- train_tafd.py: paper-aligned training and evaluation entrypoint.
-- evaluate_adaptive_diagnosis.py: adaptive diagnosis-attack evaluation entrypoint.
-- ablation_no_threat_domain_diagnosis.py: removes threat-domain diagnosis and
-  uses input-independent uniform expert aggregation.
-- ablation_direct_frequency_mask.py: direct-mask ablation entrypoint.
-- ablation_no_assignment_alignment.py: assignment-alignment ablation entrypoint.
-- ablation_standard_convolution.py: standard-convolution ablation entrypoint.
-- main_train_pgdtrain.py: original implementation retained for compatibility.
-- models/: TaFD backbones, threat-domain diagnosis, and FC-Conv implementation.
-- attacks/: heterogeneous attack implementations used by TaFD.
-- torchattacks/: vendored torchattacks source required by this code snapshot.
-- utils/: dataset and training utilities.
-- docs/: reproducibility and provenance notes.
+```text
+train_tafd.py                                      Main TaFD entrypoint
+train_ablation_without_threat_domain_diagnosis.py Threat-domain diagnosis ablation
+train_ablation_without_basis_parameterized_mask.py
+train_ablation_without_hungarian_alignment.py
+train_ablation_without_frequency_decoupling.py
+evaluate_adaptive_diagnosis.py                    Adaptive diagnosis evaluation
+models/                                           TaFD and FC-Conv implementations
+training/                                         Training and validation pipelines
+evaluation/                                       Supplemental evaluation utilities
+attacks/                                          Heterogeneous attack implementations
+scripts/                                          Paper-configuration examples
+configs/                                          Configuration summaries
+docs/                                             Reproducibility notes
+```
 
 ## Installation
 
-Create a Python environment with PyTorch and install the remaining dependencies:
+Create a Python environment with a CUDA-enabled PyTorch installation, then run:
 
-    pip install -r requirements.txt
+```bash
+pip install -r requirements.txt
+```
 
-The code expects CUDA for full training and evaluation. CPU import tests are
-supported, but paper-scale runs require a GPU.
+CPU execution is supported for imports and smoke tests. Full training and
+adversarial evaluation require a CUDA GPU.
 
-## Dataset Layout
+## Datasets
 
-Place datasets under a user-controlled root and pass it through --dataset_path.
-No dataset files are included in this repository. The paper experiments use
-CIFAR-10, CIFAR-100, and Imagenette.
+Pass the dataset root explicitly with `--dataset_path`. CIFAR-10 and CIFAR-100
+are loaded through `torchvision`. Imagenette must be placed under the dataset
+root in ImageFolder format:
 
-CIFAR-10 and CIFAR-100 are loaded through torchvision. For Imagenette, place the
-dataset under one of the supported folder names:
+```text
+datasets/
+  imagenette2-320/
+    train/
+    val/
+```
 
-    datasets/
-      imagenette2-320/
-        train/
-        val/
+The loader also recognizes `imagenette2`, `imagenette2-160`, and `imagenette`.
+All Imagenette experiments use `RandomResizedCrop(224)` during training and
+`Resize(256)` followed by `CenterCrop(224)` during evaluation.
 
-Imagenette can also be named imagenette2, imagenette2-160, or imagenette.
+## Attack Unions
 
-The v20 configuration uses GPGD and StAdv in addition to the norm-bounded and
-color attacks. Public commands follow the terminology used in the paper while
-preserving compatibility with archived checkpoints.
+The public entrypoints select one of the two complete attack unions evaluated
+in the paper. Individual attacks cannot be enabled or disabled from the CLI.
 
-## Training Examples
+- `canonical`: training uses 10-step PGD-Linf, PGD-L2, ACE, HSVAdv,
+  ReColorAdv, ALA, and RetouchUAA. Evaluation uses 100-step APGD-Linf and
+  APGD-L2 together with ACE, ALA, HSVAdv, ReColorAdv, and RetouchUAA.
+- `broader`: training uses 10-step PGD-Linf, PGD-L2, ACE, GPGD, and StAdv.
+  Evaluation uses 100-step APGD-Linf and APGD-L2 together with ACE, StAdv,
+  and GPGD.
 
-CIFAR-10, ResNet, v10, K=2:
+The remaining attacks use the same configurations during training and
+evaluation, as specified in the paper. The internal `APGD_Linf` and
+`APGD_L2` source identifiers are retained solely for compatibility with the
+released K=2 checkpoints.
 
-    python train_tafd.py --dataset CIFAR10 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --batch_size 128 --test_batch_size 16 --end_epoch 76
+GPGD PCA bases are loaded from `--gpgd_basis_path` or generated from the
+training set and saved beside the run outputs.
 
-CIFAR-100, ResNet, v10, K=2:
+## Training
 
-    python train_tafd.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --batch_size 128 --test_batch_size 16 --end_epoch 76
+CIFAR-100 with ResNet and the canonical attack union:
 
-Imagenette, ResNet, v10, K=2:
+```bash
+python train_tafd.py \
+  --dataset CIFAR100 \
+  --dataset_path ./datasets \
+  --backbone resnet \
+  --attack_union canonical \
+  --num_threat_domains 2 \
+  --batch_size 128 \
+  --test_batch_size 16 \
+  --end_epoch 76
+```
 
-    python train_tafd.py --dataset Imagenette --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --batch_size 12 --test_batch_size 16 --end_epoch 76
+Imagenette with MobileViT and the broader attack union:
 
-Imagenette, MobileViT, v20, K=2:
+```bash
+python train_tafd.py \
+  --dataset Imagenette \
+  --dataset_path ./datasets \
+  --backbone mobilevit \
+  --attack_union broader \
+  --num_threat_domains 2 \
+  --batch_size 12 \
+  --test_batch_size 16 \
+  --end_epoch 76
+```
 
-    python train_tafd.py --dataset Imagenette --dataset_path ./datasets --backbone mobilevit --attack_config v20 --domains 2 --batch_size 12 --test_batch_size 16 --end_epoch 76
+Equivalent launch examples are provided in `scripts/`. Run directories are
+created under `results/` unless `--result_dir` is specified.
 
-The end_epoch argument is exclusive. The paper-style 75-epoch run is therefore
-specified as --start_epoch 0 --end_epoch 76.
+## Checkpoints and Evaluation
 
-## Evaluation
+Resume a run or evaluate an archived checkpoint with `--resume`:
 
-Resume from a checkpoint by passing --resume:
+```bash
+python train_tafd.py \
+  --dataset CIFAR100 \
+  --dataset_path ./datasets \
+  --backbone resnet \
+  --attack_union canonical \
+  --num_threat_domains 2 \
+  --resume ./checkpoints/latest_model.pth \
+  --start_epoch 75 \
+  --end_epoch 76
+```
 
-    python train_tafd.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --resume ./checkpoints/latest_model.pth --start_epoch 75 --end_epoch 76
+The paper-aligned refactor preserves the original TaFD state-dict keys. K=2
+checkpoints produced by the experiment code can therefore be loaded directly.
 
-Adaptive diagnosis evaluation:
+Run the adaptive diagnosis evaluation with:
 
-    python evaluate_adaptive_diagnosis.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --resume ./checkpoints/latest_model.pth
+```bash
+python evaluate_adaptive_diagnosis.py \
+  --dataset CIFAR100 \
+  --dataset_path ./datasets \
+  --backbone resnet \
+  --attack_union canonical \
+  --num_threat_domains 2 \
+  --resume ./checkpoints/latest_model.pth
+```
 
-Threat-domain diagnosis ablation:
+The diagnosis-dispatch stress test can also be run independently:
 
-    python ablation_no_threat_domain_diagnosis.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2
+```bash
+python -m evaluation.diagnosis_dispatch_stress_test \
+  --checkpoint ./checkpoints/latest_model.pth \
+  --output_dir ./results/diagnosis_dispatch_stress_test \
+  --dataset CIFAR100 \
+  --dataset_path ./datasets \
+  --backbone resnet \
+  --attack_union canonical
+```
 
-## Reproducibility Notes
+## Ablations
 
-- Generated outputs are written to results/ by default and are ignored by git.
-- Checkpoints, logs, datasets, and local launch scripts are intentionally
-  excluded.
-- The compatibility scripts keep the original experiment behavior. The clean
-  wrapper names are provided so that commands match the paper terminology.
-- For ablation results, use the ablation_* entrypoints listed above.
+The four paper ablations use the same command-line interface as `train_tafd.py`:
+
+```text
+train_ablation_without_threat_domain_diagnosis.py
+train_ablation_without_basis_parameterized_mask.py
+train_ablation_without_hungarian_alignment.py
+train_ablation_without_frequency_decoupling.py
+```
+
+For example:
+
+```bash
+python train_ablation_without_threat_domain_diagnosis.py \
+  --dataset CIFAR100 \
+  --dataset_path ./datasets \
+  --backbone resnet \
+  --attack_union canonical \
+  --num_threat_domains 2
+```
+
+## Reproducibility
+
+Detailed dataset, checkpoint, output, and validation notes are provided in
+[`docs/REPRODUCIBILITY.md`](docs/REPRODUCIBILITY.md). Generated datasets,
+checkpoints, logs, and result directories are excluded from version control.
 
 ## License
 
-This project is released under the MIT License. See LICENSE for details.
+This project is released under the MIT License. See [`LICENSE`](LICENSE).

@@ -1,41 +1,79 @@
 # Reproducibility
 
-## Scope
+## Paper Configuration
 
-This repository is the TaFD method release. It contains the method code,
-ablation entrypoints, attack/evaluation utilities, and vendored dependencies
-needed by the TaFD scripts. It does not include datasets, paper result
-archives, or checkpoints.
-
-## Default Paper Configuration
-
-- Threat domains: K=2
-- Backbones: ResNet and MobileViT
+- Threat domains: `K=2`
+- Backbones: ResNet-34 and MobileViT
 - Datasets: CIFAR-10, CIFAR-100, and Imagenette
-- Imagenette preprocessing: RandomResizedCrop(224) for training and
-  Resize(256) plus CenterCrop(224) for evaluation
-- Main entrypoint: train_tafd.py
+- Main entrypoint: `train_tafd.py`
+- Random seed: `0` unless overridden with `--seed`
 
-## Dataset Root
+The complete command-line defaults are available through:
 
-Always pass --dataset_path explicitly. The code no longer uses private machine
-paths. CIFAR datasets can be downloaded automatically by torchvision.
-Imagenette must already exist under the dataset root.
+```bash
+python train_tafd.py --help
+```
 
-## Checkpoints
+## Attack Protocols
 
-Checkpoints are not committed. To evaluate an archived model, pass:
+TaFD uses the two heterogeneous attack unions reported in the paper:
 
-    --resume /path/to/latest_model.pth
+- `canonical`: APGD-Linf, APGD-L2, ACE, ALA, HSVAdv, ReColorAdv, and
+  RetouchUAA.
+- `broader`: APGD-Linf, APGD-L2, ACE, StAdv, and GPGD.
 
-The checkpoint must match the dataset, backbone, attack configuration, and K
-used by the command.
+All attacks use 10 optimization steps during training. During evaluation,
+APGD-Linf and APGD-L2 use 100-step AutoPGD; the other attacks retain their
+training-time configurations. The attack source order used internally is kept
+compatible with the released K=2 checkpoints.
 
-## Smoke Testing
+## Dataset Handling
 
-Before training, run:
+Always pass `--dataset_path` explicitly. CIFAR datasets are managed by
+`torchvision`. Imagenette is loaded from an ImageFolder-compatible directory
+named `imagenette2-320`, `imagenette2`, `imagenette2-160`, or `imagenette`.
 
-    python -m py_compile train_tafd.py
-    python train_tafd.py --help
+Imagenette preprocessing is shared across TaFD configurations:
 
-For a full run, use a GPU and set --gpu to the intended CUDA device.
+- Training: `RandomResizedCrop(224)` and random horizontal flip.
+- Evaluation: `Resize(256)` followed by `CenterCrop(224)`.
+
+## Checkpoint Compatibility
+
+Checkpoints store the model, optimizer, epoch, accuracy history, and
+threat-domain diagnosis state. Supply a checkpoint with:
+
+```bash
+--resume /path/to/latest_model.pth
+```
+
+The command must use the same dataset, backbone, and attack union as the saved
+model. The number of threat domains must match the checkpoint. Public naming
+changes do not alter the serialized TaFD model keys.
+
+## GPGD Bases
+
+The broader attack union requires class-conditional PCA bases for GPGD. Use
+`--gpgd_basis_path` to load an existing basis file. If none is supplied, the
+code builds the bases from the training set and stores them with the run.
+Reusing the same basis file is recommended when comparing configurations.
+
+## Outputs
+
+Each run records checkpoints, text logs, accuracy histories, and evaluation
+figures under `--result_dir`. When this argument is omitted, a directory name
+is generated from the dataset, backbone, number of threat domains, attack
+union, optimization settings, batch size, epoch count, and seed.
+
+## Verification
+
+Before a full experiment, verify the installation with:
+
+```bash
+python -m compileall -q .
+python train_tafd.py --help
+python evaluate_adaptive_diagnosis.py --help
+```
+
+Full adversarial training and evaluation require a CUDA GPU. CPU execution is
+intended for imports, parser checks, model construction, and small smoke tests.

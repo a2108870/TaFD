@@ -1,29 +1,25 @@
 # Code Provenance
 
-This release was assembled from the curated TaFD working snapshot used for the
-paper experiments.
+This anonymous release is derived from the TaFD experiment snapshot used for
+the paper results. Public module, function, argument, log, and output names were
+aligned with the terminology used in the manuscript.
 
-Included:
+The refactor preserves the method's computation and archived checkpoint
+compatibility. In particular, the state-dict fields required by trained TaFD
+models retain their original serialized keys.
 
-- TaFD main training/evaluation implementation.
-- TaFD method ablation implementations.
-- Attack utilities used by the TaFD training and evaluation scripts.
-- Local torchattacks snapshot required by the code.
+## Included
 
-Excluded:
+- TaFD training and validation code.
+- ResNet and MobileViT TaFD implementations.
+- FC-Conv and the four paper ablations.
+- Heterogeneous attacks used by TaFD.
+- Adaptive threat-domain diagnosis and diagnosis-dispatch evaluations.
+- The vendored `torchattacks` implementation required by this snapshot.
 
-- Datasets, checkpoints, generated results, logs, pid files, cache files, and
-  local launch scripts.
+## Excluded
 
-Naming changes:
-
-- train_tafd.py wraps main_train_pgdtrain.py.
-- evaluate_adaptive_diagnosis.py wraps main_eval_gateatk_scales.py.
-- ablation_no_threat_domain_diagnosis.py wraps
-  main_train_pgdtrain_woDomainUniformMix.py.
-- ablation_direct_frequency_mask.py wraps main_train_pgdtrain_directMask.py.
-- ablation_no_assignment_alignment.py wraps main_train_pgdtrain_woHungary.py.
-- ablation_standard_convolution.py wraps main_train_pgdtrain_stdconv.py.
-
-The original implementation filenames are retained for compatibility and to
-avoid silently changing the experimental logic.
+- Datasets and generated dataset caches.
+- Trained checkpoints and experiment result archives.
+- Machine-specific launch files, process files, and logs.
+- Credentials, server addresses, personal paths, and identifying metadata.

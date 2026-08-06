@@ -1,17 +1,17 @@
-"""Train or evaluate TaFD with paper-aligned terminology."""
+"""Ablation: remove assignment alignment in threat-domain diagnosis."""
 
-import training.tafd as tafd_impl
+import training.without_hungarian_alignment as tafd_impl
 from tafd_cli import build_parser, prepare_args
 
 
 def main() -> None:
     parser = build_parser(
-        "Train or evaluate TaFD with threat-domain diagnosis and diagnosis-dispatch.",
+        "Train the TaFD ablation without assignment alignment.",
     )
     args = prepare_args(
         parser.parse_args(),
         tafd_impl,
-        result_prefix="tafd",
+        result_prefix="tafd_no_assignment_alignment",
     )
     tafd_impl.main(args)
 

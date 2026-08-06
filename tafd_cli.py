@@ -1,9 +1,4 @@
-"""Shared command-line helpers for the public TaFD release.
-
-The original training files are kept close to the experiment code used for the
-paper.  This module provides clean, paper-aligned entrypoints without changing
-the underlying training and evaluation logic.
-"""
+"""Shared command-line helpers for the public TaFD release."""
 
 from __future__ import annotations
 
@@ -15,44 +10,8 @@ from types import ModuleType
 import numpy as np
 import torch
 
-
-ATTACK_CHOICES = [
-    "Clean",
-    "APGD_Linf",
-    "APGD_L2",
-    "SPSA",
-    "ACE",
-    "ReColorAdv",
-    "Hue",
-    "Light",
-    "UAA",
-    "GPGD",
-    "StAdv",
-]
-
-_PUBLIC_TO_INTERNAL_ATTACK = {
-    "GPGD": "SUB",
-    "StAdv": "STADV",
-}
-_INTERNAL_TO_PUBLIC_ATTACK = {value: key for key, value in _PUBLIC_TO_INTERNAL_ATTACK.items()}
-
-
-def to_internal_attack_name(name: str) -> str:
-    """Map paper terminology to the legacy identifier used by checkpoints."""
-    return _PUBLIC_TO_INTERNAL_ATTACK.get(name, name)
-
-
-def to_public_attack_name(name: str) -> str:
-    """Map legacy implementation identifiers to paper terminology."""
-    return _INTERNAL_TO_PUBLIC_ATTACK.get(name, name)
-
-
 def build_parser(
-    description: str,
-    *,
-    include_domain_route_ablation: bool = False,
-    include_mvit_fdconv: bool = False,
-) -> argparse.ArgumentParser:
+    description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=description,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -61,7 +20,8 @@ def build_parser(
         "--dataset",
         type=str,
         default="CIFAR100",
-        help="Dataset name: CIFAR10, CIFAR100, Tiny_32_10class, Tiny_32_200class, or Imagenette.",
+        choices=["CIFAR10", "CIFAR100", "Imagenette"],
+        help="Dataset used in the paper experiments.",
     )
     parser.add_argument(
         "--dataset_path",
@@ -77,21 +37,21 @@ def build_parser(
         help="Classifier backbone.",
     )
     parser.add_argument(
-        "--attack_config",
+        "--attack_union",
         type=str,
-        default="v10",
-        choices=["v10", "v20"],
+        default="canonical",
+        choices=["canonical", "broader"],
         help="Heterogeneous attack set used for training and evaluation.",
     )
     parser.add_argument(
-        "--domains",
+        "--num_threat_domains",
         type=int,
         default=2,
         help="Number of threat domains K. The paper default is K=2.",
     )
     parser.add_argument("--lr", type=float, default=0.001, help="Main-network learning rate.")
     parser.add_argument(
-        "--lr_domain",
+        "--diagnosis_lr",
         type=float,
         default=0.001,
         help="Threat-domain diagnosis learning rate.",
@@ -120,60 +80,32 @@ def build_parser(
         help="Output directory. A paper-style directory is generated when omitted.",
     )
     parser.add_argument(
-        "--n_cls",
+        "--num_classes",
         type=int,
         default=10,
         help="Number of classes. Inferred automatically for known datasets.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--domain_loss_weight",
+        "--diagnosis_loss_weight",
         type=float,
         default=1.0,
         help="Weight of the threat-domain diagnosis loss.",
     )
     parser.add_argument(
-        "--map_update_every",
+        "--assignment_update_interval",
         type=int,
         default=50,
         help="Iteration interval for updating threat-domain assignments.",
     )
-    if include_domain_route_ablation:
-        parser.add_argument(
-            "--ablate_domain_route",
-            type=str,
-            default="none",
-            choices=["none", "fixed0", "uniform"],
-            help="Optional route-dispatch ablation used by the no-diagnosis script.",
-        )
-        parser.add_argument(
-            "--ablate_domain_route_id",
-            type=int,
-            default=0,
-            help="Route id used when --ablate_domain_route=fixed0.",
-        )
     parser.add_argument(
-        "--attacks",
-        type=str,
-        nargs="+",
-        default=None,
-        choices=ATTACK_CHOICES,
-        help="Evaluation attacks. Defaults to the selected attack_config.",
-    )
-    parser.add_argument(
-        "--subspace_basis_path",
+        "--gpgd_basis_path",
         type=str,
         default="",
         help="Optional PCA-basis file for the GPGD attack.",
     )
-    parser.add_argument("--subspace_rank", type=int, default=128)
-    parser.add_argument("--subspace_max_per_class", type=int, default=600)
-    if include_mvit_fdconv:
-        parser.add_argument(
-            "--mvit_fdconv",
-            action="store_true",
-            help="Use FC-Conv in MobileViT block input convolutions.",
-        )
+    parser.add_argument("--gpgd_rank", type=int, default=128)
+    parser.add_argument("--gpgd_max_per_class", type=int, default=600)
     parser.add_argument(
         "--gpu",
         type=int,
@@ -190,28 +122,21 @@ def prepare_args(args: argparse.Namespace, impl: ModuleType, *, result_prefix: s
     else:
         impl.device = torch.device("cpu")
 
-    attack_cfg = impl.ATTACK_CONFIGS[args.attack_config]
-    args.num_sources = attack_cfg["num_sources"]
+    attack_cfg = impl.ATTACK_UNIONS[args.attack_union]
+    args.num_attack_sources = attack_cfg["num_attack_sources"]
     args.train_attacks = list(attack_cfg["train_attacks"])
     args.test_attacks = list(attack_cfg["test_attacks"])
-    args.domain_names = list(attack_cfg["domain_names"])
-    args.subspace_bases = None
+    args.attack_names = list(attack_cfg["attack_names"])
+    args.gpgd_bases = None
 
-    if args.attacks:
-        args.attacks = [to_internal_attack_name(name) for name in args.attacks]
-    else:
-        args.attacks = list(args.test_attacks)
-
-    args.n_cls = impl._infer_num_classes(args.dataset, fallback=args.n_cls)
-
-    if not hasattr(args, "mvit_fdconv"):
-        args.mvit_fdconv = False
+    args.num_classes = impl._infer_num_classes(args.dataset, fallback=args.num_classes)
 
     if not args.result_dir:
         args.result_dir = (
-            f"./results/{result_prefix}_{args.backbone}_{args.dataset}_d{args.domains}"
-            f"_{args.attack_config}_lr{args.lr}_dlr{args.lr_domain}"
-            f"_dw{args.domain_loss_weight}_bs{args.batch_size}"
+            f"./results/{result_prefix}_{args.backbone}_{args.dataset}"
+            f"_k{args.num_threat_domains}_{args.attack_union}_lr{args.lr}"
+            f"_diagnosislr{args.diagnosis_lr}"
+            f"_diagnosisw{args.diagnosis_loss_weight}_bs{args.batch_size}"
             f"_ep{args.end_epoch}_seed{args.seed}"
         )
 
@@ -224,12 +149,12 @@ def prepare_args(args: argparse.Namespace, impl: ModuleType, *, result_prefix: s
         torch.backends.cudnn.benchmark = True
 
     print("[Config] dataset:", args.dataset)
-    print("[Config] classes:", args.n_cls)
+    print("[Config] classes:", args.num_classes)
     print("[Config] backbone:", args.backbone)
-    print("[Config] attack_config:", args.attack_config)
-    print("[Config] train_attacks:", [to_public_attack_name(name) for name in args.train_attacks])
-    print("[Config] eval_attacks:", [to_public_attack_name(name) for name in args.attacks])
-    print("[Config] threat_domains:", args.domains)
+    print("[Config] attack_union:", args.attack_union)
+    print("[Config] train_attacks:", args.train_attacks)
+    print("[Config] test_attacks:", args.test_attacks)
+    print("[Config] threat_domains:", args.num_threat_domains)
     print("[Config] device:", impl.device)
     print("[Config] result_dir:", args.result_dir)
     return args

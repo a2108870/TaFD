@@ -1,0 +1,7 @@
+dataset=CIFAR100
+backbone=resnet
+attack_union=canonical
+num_threat_domains=2
+batch_size=128
+test_batch_size=16
+end_epoch=76
