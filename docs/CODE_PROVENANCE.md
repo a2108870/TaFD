@@ -1,8 +1,7 @@
 # Code Provenance
 
-This release was assembled from the curated TaFD working snapshot:
-
-    _v20trad_run
+This release was assembled from the curated TaFD working snapshot used for the
+paper experiments.
 
 Included:
 
@@ -13,11 +12,8 @@ Included:
 
 Excluded:
 
-- Third-party baseline entrypoints: PUAT, FACE, TRADES, RAMP, MNG, DAT, GBN,
-  and standard adversarial-training scripts.
 - Datasets, checkpoints, generated results, logs, pid files, cache files, and
-  server-specific launch scripts.
-- Private machine paths and hardcoded server paths.
+  local launch scripts.
 
 Naming changes:
 

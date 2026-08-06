@@ -3,9 +3,8 @@
 Official release repository for TaFD, a threat-aware frequency-domain defense
 for heterogeneous adversarial training.
 
-This repository contains the TaFD method code used for the paper submission.
-Third-party baselines such as PUAT, FACE, TRADES, RAMP, MNG, DAT, and GBN are
-not included. The release focuses on reproducing TaFD and its method ablations.
+This repository contains the TaFD method code used for the paper submission and
+the ablation entrypoints needed to reproduce the reported TaFD variants.
 
 ## Method Components
 
@@ -45,14 +44,13 @@ supported, but paper-scale runs require a GPU.
 ## Dataset Layout
 
 Place datasets under a user-controlled root and pass it through --dataset_path.
-No dataset files are included in this repository.
+No dataset files are included in this repository. The paper experiments use
+CIFAR-10, CIFAR-100, and Imagenette.
 
-Expected layouts:
+CIFAR-10 and CIFAR-100 are loaded through torchvision. For Imagenette, place the
+dataset under one of the supported folder names:
 
     datasets/
-      cifar100/
-      tiny-imagenet-200-32x32/
-      tiny-imagenet_10class_32/
       imagenette2-320/
         train/
         val/
@@ -60,6 +58,10 @@ Expected layouts:
 Imagenette can also be named imagenette2, imagenette2-160, or imagenette.
 
 ## Training Examples
+
+CIFAR-10, ResNet, v10, K=2:
+
+    python train_tafd.py --dataset CIFAR10 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --batch_size 128 --test_batch_size 16 --end_epoch 76
 
 CIFAR-100, ResNet, v10, K=2:
 
@@ -72,6 +74,9 @@ Imagenette, ResNet, v10, K=2:
 Imagenette, MobileViT, v20, K=2:
 
     python train_tafd.py --dataset Imagenette --dataset_path ./datasets --backbone mobilevit --attack_config v20 --domains 2 --batch_size 12 --test_batch_size 16 --end_epoch 76
+
+The end_epoch argument is exclusive. The paper-style 75-epoch run is therefore
+specified as --start_epoch 0 --end_epoch 76.
 
 ## Evaluation
 
@@ -86,12 +91,11 @@ Adaptive diagnosis evaluation:
 ## Reproducibility Notes
 
 - Generated outputs are written to results/ by default and are ignored by git.
-- Checkpoints, logs, datasets, and local server scripts are intentionally
+- Checkpoints, logs, datasets, and local launch scripts are intentionally
   excluded.
 - The compatibility scripts keep the original experiment behavior. The clean
   wrapper names are provided so that commands match the paper terminology.
-- For ablation results, use the ablation_* entrypoints instead of unrelated
-  baseline code.
+- For ablation results, use the ablation_* entrypoints listed above.
 
 ## License
 

@@ -941,8 +941,6 @@ def main(args):
     print(f"选择的评估攻击: {args.attacks}")
     if getattr(args, 'subspace_bases', None) is not None:
         print(f"SUB PCA bases: {args.subspace_basis_path}")
-    if _is_imagenette_dataset(args.dataset):
-        print("[Note] Imagenette uses higher-resolution inputs; current attack defaults come from low-res experiments, so please retune before final reporting.")
     print("=" * 60)
     print(f"   - SPSA: 仅在 epoch ∈ {sorted(SPSA_EVAL_EPOCHS)} 时评估")
     print("=" * 60)
