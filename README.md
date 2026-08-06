@@ -21,7 +21,8 @@ the ablation entrypoints needed to reproduce the reported TaFD variants.
 
 - train_tafd.py: paper-aligned training and evaluation entrypoint.
 - evaluate_adaptive_diagnosis.py: adaptive diagnosis-attack evaluation entrypoint.
-- ablation_no_threat_domain_diagnosis.py: ablation used for removing diagnosis.
+- ablation_no_threat_domain_diagnosis.py: removes threat-domain diagnosis and
+  uses input-independent uniform expert aggregation.
 - ablation_direct_frequency_mask.py: direct-mask ablation entrypoint.
 - ablation_no_assignment_alignment.py: assignment-alignment ablation entrypoint.
 - ablation_standard_convolution.py: standard-convolution ablation entrypoint.
@@ -57,6 +58,10 @@ dataset under one of the supported folder names:
 
 Imagenette can also be named imagenette2, imagenette2-160, or imagenette.
 
+The v20 configuration uses GPGD and StAdv in addition to the norm-bounded and
+color attacks. Public commands follow the terminology used in the paper while
+preserving compatibility with archived checkpoints.
+
 ## Training Examples
 
 CIFAR-10, ResNet, v10, K=2:
@@ -87,6 +92,10 @@ Resume from a checkpoint by passing --resume:
 Adaptive diagnosis evaluation:
 
     python evaluate_adaptive_diagnosis.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2 --resume ./checkpoints/latest_model.pth
+
+Threat-domain diagnosis ablation:
+
+    python ablation_no_threat_domain_diagnosis.py --dataset CIFAR100 --dataset_path ./datasets --backbone resnet --attack_config v10 --domains 2
 
 ## Reproducibility Notes
 

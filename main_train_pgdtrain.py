@@ -989,7 +989,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("Unified-LR Adversarial Training + PGD-Train APGD-Test + Fixed BPDA-T")
+    parser = argparse.ArgumentParser("TaFD heterogeneous adversarial training and evaluation")
     parser.add_argument("--dataset", type=str, default="CIFAR100",
                         help="数据集名称（例如 Tiny_32_10class / Tiny_32_200class / CIFAR10 / CIFAR100 等）")
     parser.add_argument("--dataset_path", type=str, default="./datasets/",
@@ -1016,7 +1016,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
 
     # 域/聚类数（控制域分类器、聚类、专家数）
-    parser.add_argument("--domains", type=int, default=1, help="domain/聚类数")
+    parser.add_argument("--domains", type=int, default=2, help="domain/聚类数")
 
     # domain 监督权重
     parser.add_argument("--domain_loss_weight", type=float, default=1.0,

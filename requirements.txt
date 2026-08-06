@@ -8,3 +8,4 @@ scipy
 kornia
 einops
 Pillow
+six

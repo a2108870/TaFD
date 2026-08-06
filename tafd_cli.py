@@ -26,9 +26,25 @@ ATTACK_CHOICES = [
     "Hue",
     "Light",
     "UAA",
-    "SUB",
-    "STADV",
+    "GPGD",
+    "StAdv",
 ]
+
+_PUBLIC_TO_INTERNAL_ATTACK = {
+    "GPGD": "SUB",
+    "StAdv": "STADV",
+}
+_INTERNAL_TO_PUBLIC_ATTACK = {value: key for key, value in _PUBLIC_TO_INTERNAL_ATTACK.items()}
+
+
+def to_internal_attack_name(name: str) -> str:
+    """Map paper terminology to the legacy identifier used by checkpoints."""
+    return _PUBLIC_TO_INTERNAL_ATTACK.get(name, name)
+
+
+def to_public_attack_name(name: str) -> str:
+    """Map legacy implementation identifiers to paper terminology."""
+    return _INTERNAL_TO_PUBLIC_ATTACK.get(name, name)
 
 
 def build_parser(
@@ -148,7 +164,7 @@ def build_parser(
         "--subspace_basis_path",
         type=str,
         default="",
-        help="Optional PCA-basis file for SUB/GPGD-style subspace attacks.",
+        help="Optional PCA-basis file for the GPGD attack.",
     )
     parser.add_argument("--subspace_rank", type=int, default=128)
     parser.add_argument("--subspace_max_per_class", type=int, default=600)
@@ -181,7 +197,9 @@ def prepare_args(args: argparse.Namespace, impl: ModuleType, *, result_prefix: s
     args.domain_names = list(attack_cfg["domain_names"])
     args.subspace_bases = None
 
-    if not args.attacks:
+    if args.attacks:
+        args.attacks = [to_internal_attack_name(name) for name in args.attacks]
+    else:
         args.attacks = list(args.test_attacks)
 
     args.n_cls = impl._infer_num_classes(args.dataset, fallback=args.n_cls)
@@ -209,8 +227,8 @@ def prepare_args(args: argparse.Namespace, impl: ModuleType, *, result_prefix: s
     print("[Config] classes:", args.n_cls)
     print("[Config] backbone:", args.backbone)
     print("[Config] attack_config:", args.attack_config)
-    print("[Config] train_attacks:", args.train_attacks)
-    print("[Config] eval_attacks:", args.attacks)
+    print("[Config] train_attacks:", [to_public_attack_name(name) for name in args.train_attacks])
+    print("[Config] eval_attacks:", [to_public_attack_name(name) for name in args.attacks])
     print("[Config] threat_domains:", args.domains)
     print("[Config] device:", impl.device)
     print("[Config] result_dir:", args.result_dir)

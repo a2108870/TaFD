@@ -3,6 +3,7 @@
 import argparse
 
 import main_eval_gateatk_scales as eval_impl
+from tafd_cli import to_internal_attack_name, to_public_attack_name
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         nargs="+",
         default=None,
-        choices=eval_impl.SUPPORTED_GATE_ATTACKS,
+        choices=[to_public_attack_name(name) for name in eval_impl.SUPPORTED_GATE_ATTACKS],
     )
     parser.add_argument("--max_batches", type=int, default=0)
     parser.add_argument("--subspace_basis_path", type=str, default="")
@@ -42,7 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    eval_impl.main(build_parser().parse_args())
+    args = build_parser().parse_args()
+    if args.attacks:
+        args.attacks = [to_internal_attack_name(name) for name in args.attacks]
+    eval_impl.main(args)
 
 
 if __name__ == "__main__":

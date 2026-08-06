@@ -1055,7 +1055,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("Unified-LR Adversarial Training + PGD-Train APGD-Test + Fixed BPDA-T")
+    parser = argparse.ArgumentParser("TaFD training without threat-domain diagnosis")
     parser.add_argument("--dataset", type=str, default="CIFAR100",
                         help="鏁版嵁闆嗗悕绉帮紙渚嬪 Tiny_32_10class / Tiny_32_200class / CIFAR10 / CIFAR100 绛夛級")
     parser.add_argument("--dataset_path", type=str, default="./datasets/",
@@ -1082,13 +1082,13 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
 
     # 鍩?鑱氱被鏁帮紙鎺у埗鍩熷垎绫诲櫒銆佽仛绫汇€佷笓瀹舵暟锛?
-    parser.add_argument("--domains", type=int, default=1, help="Number of domains/clusters")
+    parser.add_argument("--domains", type=int, default=2, help="Number of domains/clusters")
 
     # domain 鐩戠潱鏉冮噸
-    parser.add_argument("--domain_loss_weight", type=float, default=1.0,
+    parser.add_argument("--domain_loss_weight", type=float, default=0.0,
                         help="Weight for the domain supervision loss")
     # 鍔ㄦ€佽仛绫婚鐜囷紙杩唬姝ワ級
-    parser.add_argument("--ablate_domain_route", type=str, default="none",
+    parser.add_argument("--ablate_domain_route", type=str, default="uniform",
                         choices=["none", "fixed0", "uniform"],
                         help="Ablation for domain routing. fixed0 forces route 0; uniform uses all routes equally.")
     parser.add_argument("--ablate_domain_route_id", type=int, default=0,
