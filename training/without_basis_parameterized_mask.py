@@ -335,6 +335,54 @@ def _infer_input_size(dataset_name: str, fallback: int = 32) -> int:
     return 32
 
 
+@torch.no_grad()
+def _materialize_direct_mask_parameters(model: nn.Module, input_size: int):
+    """Create all resolution-dependent direct-mask parameters before optimizer setup."""
+    reference_parameter = next(model.parameters())
+    dummy_input = torch.zeros(
+        1,
+        3,
+        input_size,
+        input_size,
+        device=reference_parameter.device,
+        dtype=reference_parameter.dtype,
+    )
+    was_training = model.training
+    model.eval()
+    try:
+        model(dummy_input)
+    finally:
+        model.train(was_training)
+
+    mask_parameter_names = [
+        name for name, _ in model.named_parameters()
+        if 'direct_mask_embeddings' in name
+    ]
+    if not mask_parameter_names:
+        raise RuntimeError(
+            'Direct-mask parameter materialization produced no registered parameters.'
+        )
+    return mask_parameter_names
+
+
+def _assert_optimizer_covers_trainable_parameters(model: nn.Module, optimizer: optim.Optimizer):
+    """Fail if any trainable model parameter is absent from the optimizer."""
+    optimizer_parameter_ids = {
+        id(parameter)
+        for group in optimizer.param_groups
+        for parameter in group['params']
+    }
+    missing_parameter_names = [
+        name for name, parameter in model.named_parameters()
+        if parameter.requires_grad and id(parameter) not in optimizer_parameter_ids
+    ]
+    if missing_parameter_names:
+        raise RuntimeError(
+            'Trainable parameters missing from optimizer: '
+            + ', '.join(missing_parameter_names)
+        )
+
+
 def _infer_num_classes(dataset_name: str, fallback: int = 10) -> int:
     """Infer the number of classes from a dataset or result identifier."""
     if dataset_name is None:
@@ -836,6 +884,11 @@ def main(args):
         model_kwargs['size'] = _infer_input_size(args.dataset)
 
     model = build_tafd_model(**model_kwargs).to(device)
+    mask_parameter_names = _materialize_direct_mask_parameters(
+        model,
+        input_size=_infer_input_size(args.dataset),
+    )
+    print(f"Materialized {len(mask_parameter_names)} direct-mask parameter tensors before optimizer setup")
     model.count_frequency_convolutions()
 
 
@@ -847,6 +900,7 @@ def main(args):
         {"params": main_params, "lr": args.lr, "weight_decay": args.weight_decay, "name": "main"},
         {"params": diagnosis_params, "lr": args.diagnosis_lr, "weight_decay": args.weight_decay, "name": "diagnosis"},
     ])
+    _assert_optimizer_covers_trainable_parameters(model, optimizer)
     set_group_lrs(optimizer, args.lr, args.diagnosis_lr)
 
 
