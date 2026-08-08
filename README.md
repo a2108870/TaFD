@@ -3,9 +3,8 @@
 Official implementation of **TaFD**, a threat-aware frequency-domain defense
 for heterogeneous adversarial training.
 
-The release provides the TaFD training pipeline, the four component ablations
-reported in the paper, the heterogeneous attacks used by the method, and the
-supplemental adaptive diagnosis evaluation.
+The release provides the TaFD training pipeline, the heterogeneous attacks
+used by the method, and the supplemental adaptive diagnosis evaluation.
 
 ## Method Overview
 
@@ -24,10 +23,6 @@ The default configuration uses `K=2` threat domains.
 
 ```text
 train_tafd.py                                      Main TaFD entrypoint
-train_ablation_without_threat_domain_diagnosis.py Threat-domain diagnosis ablation
-train_ablation_without_basis_parameterized_mask.py
-train_ablation_without_hungarian_alignment.py
-train_ablation_without_frequency_decoupling.py
 evaluate_adaptive_diagnosis.py                    Adaptive diagnosis evaluation
 models/                                           TaFD and FC-Conv implementations
 training/                                         Training and validation pipelines
@@ -160,28 +155,6 @@ python -m evaluation.diagnosis_dispatch_stress_test \
   --dataset_path ./datasets \
   --backbone resnet \
   --attack_union canonical
-```
-
-## Ablations
-
-The four paper ablations use the same command-line interface as `train_tafd.py`:
-
-```text
-train_ablation_without_threat_domain_diagnosis.py
-train_ablation_without_basis_parameterized_mask.py
-train_ablation_without_hungarian_alignment.py
-train_ablation_without_frequency_decoupling.py
-```
-
-For example:
-
-```bash
-python train_ablation_without_threat_domain_diagnosis.py \
-  --dataset CIFAR100 \
-  --dataset_path ./datasets \
-  --backbone resnet \
-  --attack_union canonical \
-  --num_threat_domains 2
 ```
 
 ## Reproducibility

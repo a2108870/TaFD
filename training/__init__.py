@@ -1,1 +1,1 @@
-"""Training implementations for TaFD and its paper ablations."""
+"""Training implementation for TaFD."""

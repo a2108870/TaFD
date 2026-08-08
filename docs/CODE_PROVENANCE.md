@@ -12,7 +12,7 @@ models retain their original serialized keys.
 
 - TaFD training and validation code.
 - ResNet and MobileViT TaFD implementations.
-- FC-Conv and the four paper ablations.
+- FC-Conv.
 - Heterogeneous attacks used by TaFD.
 - Adaptive threat-domain diagnosis and diagnosis-dispatch evaluations.
 - The vendored `torchattacks` implementation required by this snapshot.
