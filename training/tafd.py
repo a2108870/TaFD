@@ -911,21 +911,3 @@ def main(args):
             plot_accuracy_curves(diagnosis_accuracy_history, epoch, args.result_dir, "diagnosis_accuracy")
             save_checkpoint(model, optimizer, epoch,
                             args.result_dir, classification_accuracy_history, diagnosis_accuracy_history)
-
-
-        if epoch in (25, 50, 75):
-            try:
-                from evaluation.diagnosis_dispatch_stress_test import run_diagnosis_dispatch_stress_test
-                print(
-                    f"[DIAGNOSIS-DISPATCH] launching stress test at epoch {epoch} ...",
-                    flush=True,
-                )
-                run_diagnosis_dispatch_stress_test(model, testloader, args, device, epoch, args.result_dir)
-            except Exception as stress_test_error:
-                import traceback
-                print(
-                    f"[DIAGNOSIS-DISPATCH] stress test failed at epoch {epoch}: "
-                    f"{stress_test_error}",
-                    flush=True,
-                )
-                traceback.print_exc()

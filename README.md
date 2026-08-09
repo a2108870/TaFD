@@ -3,8 +3,8 @@
 Official implementation of **TaFD**, a threat-aware frequency-domain defense
 for heterogeneous adversarial training.
 
-The release provides the TaFD training pipeline, the heterogeneous attacks
-used by the method, and the supplemental adaptive diagnosis evaluation.
+The release provides the TaFD training pipeline and the heterogeneous attacks
+used by the method.
 
 ## Method Overview
 
@@ -23,10 +23,8 @@ The default configuration uses `K=2` threat domains.
 
 ```text
 train_tafd.py                                      Main TaFD entrypoint
-evaluate_adaptive_diagnosis.py                    Adaptive diagnosis evaluation
 models/                                           TaFD and FC-Conv implementations
 training/                                         Training and validation pipelines
-evaluation/                                       Supplemental evaluation utilities
 attacks/                                          Heterogeneous attack implementations
 scripts/                                          Paper-configuration examples
 configs/                                          Configuration summaries
@@ -132,30 +130,6 @@ python train_tafd.py \
 
 The paper-aligned refactor preserves the original TaFD state-dict keys. K=2
 checkpoints produced by the experiment code can therefore be loaded directly.
-
-Run the adaptive diagnosis evaluation with:
-
-```bash
-python evaluate_adaptive_diagnosis.py \
-  --dataset CIFAR100 \
-  --dataset_path ./datasets \
-  --backbone resnet \
-  --attack_union canonical \
-  --num_threat_domains 2 \
-  --resume ./checkpoints/latest_model.pth
-```
-
-The diagnosis-dispatch stress test can also be run independently:
-
-```bash
-python -m evaluation.diagnosis_dispatch_stress_test \
-  --checkpoint ./checkpoints/latest_model.pth \
-  --output_dir ./results/diagnosis_dispatch_stress_test \
-  --dataset CIFAR100 \
-  --dataset_path ./datasets \
-  --backbone resnet \
-  --attack_union canonical
-```
 
 ## Reproducibility
 

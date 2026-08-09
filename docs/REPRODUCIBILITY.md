@@ -72,7 +72,6 @@ Before a full experiment, verify the installation with:
 ```bash
 python -m compileall -q .
 python train_tafd.py --help
-python evaluate_adaptive_diagnosis.py --help
 ```
 
 Full adversarial training and evaluation require a CUDA GPU. CPU execution is

@@ -14,7 +14,6 @@ models retain their original serialized keys.
 - ResNet and MobileViT TaFD implementations.
 - FC-Conv.
 - Heterogeneous attacks used by TaFD.
-- Adaptive threat-domain diagnosis and diagnosis-dispatch evaluations.
 - The vendored `torchattacks` implementation required by this snapshot.
 
 ## Excluded
